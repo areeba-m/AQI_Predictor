@@ -136,7 +136,7 @@ models:
 # Hopsworks configuration (optional - can be disabled)
 hopsworks:
   enable: true # Set to true when you have API keys
-  project_name: "aqi_prediction"
+  project_name: "pearls_aqi_prediction"
 
   feature_store:
     feature_group_name: "aqi_features"
@@ -148,7 +148,7 @@ hopsworks:
 
 # Streamlit app configuration
 webapp:
-  title: "🌬️ AQI Prediction Dashboard"
+  title: "AQI Prediction Dashboard"
   page_title: "AQI Predictor"
   page_icon: "🌬️"
   layout: "wide"
