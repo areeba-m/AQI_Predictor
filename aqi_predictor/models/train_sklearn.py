@@ -343,7 +343,7 @@ class SklearnModelTrainer:
             print("   • Consider non-linear transformations")
     
     def save_best_model(self, model_dir: str = "models") -> str:
-        """Save the best model and metadata"""
+        """Save the best model and metadata locally and to Hopsworks"""
         if self.best_model is None:
             print("❌ No best model to save")
             return ""
@@ -376,14 +376,95 @@ class SklearnModelTrainer:
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
         
-        print(f"💾 Best model saved:")
+        print(f"💾 Best model saved locally:")
         print(f"   📁 Model: {model_path}")
         print(f"   📁 Scaler: {scaler_path}")
         print(f"   📁 Metadata: {metadata_path}")
         
+        # Upload to Hopsworks Model Registry
+        self._upload_to_hopsworks(model_path, scaler_path, metadata)
+        
         print(f"Best model saved: {self.best_model_name}")
         
         return model_path
+    
+    def _upload_to_hopsworks(self, model_path: str, scaler_path: str, metadata: dict):
+        """Upload model to Hopsworks Model Registry"""
+        try:
+            # Import Hopsworks integration
+            import sys
+            import os
+            # Add the pipelines directory to path
+            pipelines_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'pipelines')
+            sys.path.append(pipelines_dir)
+            from pipelines.fetch_data import HopsworksIntegration
+            
+            # Initialize Hopsworks
+            hops = HopsworksIntegration()
+            if not hops.enabled:
+                print("⚠️ Hopsworks not enabled, skipping model registry upload")
+                return
+            
+            print("🚀 Uploading model to Hopsworks Model Registry...")
+            
+            # Create model directory for upload
+            import tempfile
+            import shutil
+            
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Copy model files to temp directory
+                model_dir = os.path.join(temp_dir, "sklearn_model")
+                os.makedirs(model_dir, exist_ok=True)
+                
+                # Copy files
+                shutil.copy2(model_path, model_dir)
+                shutil.copy2(scaler_path, model_dir)
+                
+                # Create model.py file for deployment
+                model_py_content = f'''
+import joblib
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+class SklearnAQIModel:
+    def __init__(self):
+        self.model = None
+        self.scaler = None
+        self.feature_columns = {metadata['feature_columns']}
+        self.model_name = "{metadata['model_name']}"
+    
+    def load(self, model_dir):
+        """Load model and scaler"""
+        import os
+        self.model = joblib.load(os.path.join(model_dir, "{os.path.basename(model_path)}"))
+        self.scaler = joblib.load(os.path.join(model_dir, "{os.path.basename(scaler_path)}"))
+        
+    def predict(self, X):
+        """Make predictions"""
+        if self.model is None or self.scaler is None:
+            raise ValueError("Model not loaded")
+        
+        # Ensure feature order
+        X_scaled = self.scaler.transform(X[self.feature_columns])
+        return self.model.predict(X_scaled)
+'''
+                
+                model_py_path = os.path.join(model_dir, "model.py")
+                with open(model_py_path, 'w') as f:
+                    f.write(model_py_content)
+                
+                # Upload to Hopsworks
+                success = hops.save_model(model_dir, f"aqi_sklearn_{self.best_model_name.lower().replace(' ', '_')}", "sklearn")
+                
+                if success:
+                    print("✅ Model uploaded to Hopsworks Model Registry")
+                else:
+                    print("⚠️ Model upload to Hopsworks failed")
+                    
+        except Exception as e:
+            print(f"⚠️ Hopsworks model upload failed: {e}")
+            print("   Model saved locally only")
 
 def main():
     """Test the sklearn model training pipeline"""

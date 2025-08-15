@@ -95,7 +95,26 @@ class ModelManager:
                 return False
             
             model_path = os.path.join(self.model_dir, model_files[0])
-            self.dl_model = tf.keras.models.load_model(model_path)
+            
+            # Try to load with custom objects to handle metric issues
+            try:
+                self.dl_model = tf.keras.models.load_model(
+                    model_path,
+                    custom_objects={
+                        'mse': tf.keras.metrics.MeanSquaredError(),
+                        'mae': tf.keras.metrics.MeanAbsoluteError()
+                    }
+                )
+            except Exception as e:
+                print(f"⚠️ Error with custom objects, trying compile=False: {e}")
+                # Try loading without compiling
+                self.dl_model = tf.keras.models.load_model(model_path, compile=False)
+                # Recompile manually
+                self.dl_model.compile(
+                    optimizer='adam',
+                    loss='mse',
+                    metrics=['mae']
+                )
             
             # Load scalers
             scaler_X_path = os.path.join(self.model_dir, "dl_scaler_X.joblib")
@@ -118,7 +137,6 @@ class ModelManager:
             
         except Exception as e:
             print(f"❌ Error loading deep learning model: {e}")
-            
             return False
     
     def load_all_models(self) -> Dict[str, bool]:

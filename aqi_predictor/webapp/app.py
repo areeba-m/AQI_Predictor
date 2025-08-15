@@ -78,8 +78,17 @@ def load_predictor():
             return predictor, None
         else:
             return None, "No trained models found. Please train models first."
+    except ImportError as e:
+        if "tensorflow" in str(e).lower():
+            return None, f"TensorFlow not available: {str(e)}. Sklearn models may still work."
+        else:
+            return None, f"Import error: {str(e)}"
     except Exception as e:
-        return None, f"Error loading models: {str(e)}"
+        error_msg = str(e)
+        if "could not deserialize" in error_msg.lower() or "keras" in error_msg.lower():
+            return None, f"TensorFlow model compatibility issue: {error_msg}. Try using sklearn models only."
+        else:
+            return None, f"Error loading models: {error_msg}"
 
 @st.cache_data(ttl=1800)  # Cache for 30 minutes
 def fetch_latest_data():

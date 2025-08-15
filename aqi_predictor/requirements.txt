@@ -1,7 +1,7 @@
 # Essential Dependencies for AQI Prediction System
 
 # Core Data Science Libraries
-pandas>=1.5.0
+pandas>=1.5.0,<2.2.0
 numpy>=1.24.0
 scikit-learn>=1.3.0
 matplotlib>=3.6.0
@@ -12,10 +12,9 @@ plotly>=5.15.0
 tensorflow>=2.13.0
 xgboost>=1.7.0
 
-# Feature Store & MLOps (Optional)
-hopsworks>=3.4.0
-hsfs>=3.4.0
-hsml>=3.4.0
+# Feature Store & MLOps (with compatible versions)
+hopsworks>=4.2.0,<4.3.0
+urllib3>=1.25.4,<1.27
 
 # Web Application
 streamlit>=1.25.0
@@ -29,6 +28,12 @@ python-dotenv>=1.0.0
 
 # Time Series & DateTime
 pytz>=2023.3
+
+# Data Processing
+avro>=1.11.0
+
+# Streaming (required by hopsworks)
+confluent-kafka>=1.9.0
 
 # Utilities
 tqdm>=4.65.0

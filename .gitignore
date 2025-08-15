@@ -1,5 +1,5 @@
 # libraries
-aqi_predictor/aqi_env
+aqi_predictor/aqi_env/
 
 # secret key
 .env
@@ -9,3 +9,5 @@ aqi_predictor/features/__pycache__/
 aqi_predictor/models/__pycache__/
 aqi_predictor/pipelines/__pycache__/
 *.pyc
+
+aqi_predictor/data/

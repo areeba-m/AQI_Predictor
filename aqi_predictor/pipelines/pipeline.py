@@ -39,9 +39,46 @@ class AQIPipeline:
         
         print("🚀 Enhanced AQI Prediction Pipeline Initialized")
         if self.hopsworks.enabled:
-            print("✅ Hopsworks integration enabled")
+            print("✅ Hopsworks integration enabled - using cloud storage")
         else:
-            print("⚠️ Hopsworks integration disabled")
+            print("⚠️ Hopsworks integration disabled - using local storage")
+    
+    def _save_data(self, df: pd.DataFrame, stage: str, filename: str = None) -> bool:
+        """
+        Save data with Hopsworks as primary and local as fallback
+        
+        Parameters:
+        df (pd.DataFrame): Data to save
+        stage (str): Data stage ('raw', 'engineered', 'selected')
+        filename (str): Local filename for fallback
+        
+        Returns:
+        bool: Success status
+        """
+        success = False
+        
+        # Try Hopsworks first if enabled
+        if self.hopsworks.enabled:
+            print(f"☁️ Saving to Hopsworks feature store: {stage} stage")
+            success = self.hopsworks.save_to_feature_store(df, stage=stage)
+            
+            if success:
+                print(f"✅ Data saved to Hopsworks feature store")
+                return True
+            else:
+                print(f"⚠️ Hopsworks save failed, falling back to local storage")
+        
+        # Fallback to local storage
+        if filename:
+            try:
+                local_path = save_data_locally(df, filename, self.data_dir)
+                print(f"💾 Data saved locally: {local_path}")
+                return True
+            except Exception as e:
+                print(f"❌ Local save also failed: {e}")
+                return False
+        
+        return success
         
     
     def fetch_historical_data(self, years_back: int = 1, save_raw: bool = True) -> Optional[pd.DataFrame]:
@@ -60,14 +97,9 @@ class AQIPipeline:
                 print("❌ Failed to fetch complete data")
                 return None
             
-            # Save raw data
+            # Save raw data (Hopsworks first, local fallback)
             if save_raw:
-                raw_data_path = save_data_locally(historical_data, "complete_raw_data.csv", self.data_dir)
-                print(f"💾 Raw data saved: {raw_data_path}")
-            
-            # Save to Hopsworks feature store if enabled
-            if self.hopsworks.enabled:
-                self.hopsworks.save_to_feature_store(historical_data, stage="raw")
+                self._save_data(historical_data, stage="raw", filename="complete_raw_data.csv")
             
             print(f"✅ Complete data fetching completed!")
             print(f"📊 Dataset shape: {historical_data.shape}")
@@ -92,10 +124,9 @@ class AQIPipeline:
                 print("❌ Failed to fetch latest data")
                 return None
             
-            # Save raw data
+            # Save raw data (Hopsworks first, local fallback)
             if save_raw:
-                raw_data_path = save_data_locally(latest_data, "latest_raw_data.csv", self.data_dir)
-                print(f"💾 Latest data saved: {raw_data_path}")
+                self._save_data(latest_data, stage="raw", filename="latest_raw_data.csv")
             
             print(f"✅ Latest data fetching completed!")
             print(f"📊 Dataset shape: {latest_data.shape}")
@@ -121,14 +152,9 @@ class AQIPipeline:
             print("🔧 Handling missing values...")
             engineered_data = self.feature_engineer.handle_missing_values(engineered_data)
             
-            # Save engineered features
+            # Save engineered features (Hopsworks first, local fallback)
             if save_features:
-                features_path = save_data_locally(engineered_data, "engineered_features.csv", self.data_dir)
-                print(f"💾 Engineered features saved: {features_path}")
-            
-            # Save to Hopsworks feature store if enabled
-            if self.hopsworks.enabled:
-                self.hopsworks.save_to_feature_store(engineered_data, stage="engineered")
+                self._save_data(engineered_data, stage="engineered", filename="engineered_features.csv")
             
             print(f"✅ Feature engineering completed!")
             print(f"📊 Features shape: {engineered_data.shape}")
@@ -151,12 +177,11 @@ class AQIPipeline:
                 engineered_data, max_features=max_features
             )
             
-            # Save selected features
+            # Save selected features (Hopsworks first, local fallback)
             if save_features:
-                selected_path = save_data_locally(selected_data, "selected_features.csv", self.data_dir)
-                print(f"💾 Selected features saved: {selected_path}")
+                self._save_data(selected_data, stage="selected", filename="selected_features.csv")
                 
-                # Save feature names
+                # Save feature names locally as well
                 feature_names_path = os.path.join(self.data_dir, "selected_feature_names.txt")
                 with open(feature_names_path, 'w') as f:
                     f.write("\\n".join(selected_feature_names))
