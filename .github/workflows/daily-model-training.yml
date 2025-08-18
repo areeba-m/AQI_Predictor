@@ -1,0 +1,67 @@
+name: Daily Model Training
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: "0 2 * * *"
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  train-models:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set up environment variables
+        env:
+          HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+          HOPSWORKS_PROJECT_NAME: ${{ secrets.HOPSWORKS_PROJECT_NAME }}
+          HOPSWORKS_HOST: ${{ secrets.HOPSWORKS_HOST }}
+        run: |
+          echo "HOPSWORKS_API_KEY=$HOPSWORKS_API_KEY" >> .env
+          echo "HOPSWORKS_PROJECT_NAME=$HOPSWORKS_PROJECT_NAME" >> .env
+          echo "HOPSWORKS_HOST=$HOPSWORKS_HOST" >> .env
+
+      - name: Run daily model training
+        run: |
+          cd aqi_predictor
+          python scripts/train_daily_models.py
+
+      - name: Upload model artifacts
+        if: success()
+        uses: actions/upload-artifact@v3
+        with:
+          name: trained-models
+          path: |
+            models/
+          retention-days: 30
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: daily-training-logs
+          path: |
+            *.log
+            models/
+          retention-days: 7

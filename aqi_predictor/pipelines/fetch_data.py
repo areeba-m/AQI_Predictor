@@ -27,6 +27,9 @@ class OpenMeteoDataFetcher:
         self.forecast_weather_url = 'https://api.open-meteo.com/v1/forecast'
         self.forecast_air_quality_url = 'https://air-quality-api.open-meteo.com/v1/air-quality'
         
+        # Initialize Hopsworks integration
+        self.hops_integration = HopsworksIntegration()
+        
     def fetch_historical_data(self, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
         """
         Fetch historical data using archive API
@@ -88,7 +91,7 @@ class OpenMeteoDataFetcher:
     
     def fetch_recent_data(self, days_back: int = 7, days_forward: int = 0) -> Optional[pd.DataFrame]:
         """
-        Fetch recent data using forecast API (includes past_days feature)
+        Fetch recent data using archive API for recent past data
         
         Parameters:
         days_back (int): Number of days back from today
@@ -99,55 +102,15 @@ class OpenMeteoDataFetcher:
         """
         print(f"🔄 Fetching recent data for last {days_back} days...")
         
-        # Weather forecast parameters with past_days (no start/end dates needed)
-        weather_params = {
-            'latitude': self.lat,
-            'longitude': self.lon,
-            'hourly': ','.join([
-                'temperature_2m', 'relative_humidity_2m', 'dew_point_2m',
-                'apparent_temperature', 'precipitation', 'rain', 'snowfall',
-                'weather_code', 'pressure_msl', 'surface_pressure', 'cloud_cover',
-                'visibility', 'wind_speed_10m', 'wind_direction_10m', 'wind_gusts_10m'
-            ]),
-            'timezone': 'Asia/Karachi',
-            'past_days': days_back,
-            'forecast_days': days_forward
-        }
+        # Use archive API for recent past data instead of forecast API
+        today = datetime.now().date()
+        start_date = (today - timedelta(days=days_back)).strftime('%Y-%m-%d')
+        end_date = (today - timedelta(days=1)).strftime('%Y-%m-%d')  # Yesterday
         
-        # Air quality forecast parameters with past_days (no start/end dates needed)
-        air_quality_params = {
-            'latitude': self.lat,
-            'longitude': self.lon,
-            'hourly': ','.join(['carbon_monoxide', 'nitrogen_dioxide', 'sulphur_dioxide', 'ozone', 'uv_index', 'us_aqi']),
-            'timezone': 'Asia/Karachi',
-            'past_days': days_back,
-            'forecast_days': days_forward
-        }
+        print(f"📅 Using archive API for date range: {start_date} to {end_date}")
         
-        try:
-            # Fetch weather forecast (includes recent past data)
-            print(f"🌤️ Fetching weather data...")
-            weather_response = requests.get(self.forecast_weather_url, params=weather_params, timeout=30)
-            print(f"   Weather URL: {weather_response.url}")
-            weather_response.raise_for_status()
-            weather_data = weather_response.json()
-            
-            # Fetch air quality forecast (includes recent past data)
-            print(f"🌫️ Fetching air quality data...")
-            air_quality_response = requests.get(self.forecast_air_quality_url, params=air_quality_params, timeout=30)
-            print(f"   Air quality URL: {air_quality_response.url}")
-            air_quality_response.raise_for_status()
-            air_quality_data = air_quality_response.json()
-            
-            # Create combined dataframe
-            combined_df = self._combine_weather_air_quality(weather_data, air_quality_data)
-            
-            print(f"✅ Recent data fetched: {len(combined_df)} records")
-            return combined_df
-            
-        except Exception as e:
-            print(f"❌ Error fetching recent data: {e}")
-            return None
+        # Use the historical data fetcher for recent data
+        return self.fetch_historical_data(start_date, end_date)
     
     def _combine_weather_air_quality(self, weather_data: dict, air_quality_data: dict) -> pd.DataFrame:
         """Combine weather and air quality data into single DataFrame"""
@@ -201,27 +164,28 @@ class OpenMeteoDataFetcher:
     
     def create_complete_dataset(self, years_back: int = 1, include_recent: bool = True) -> Optional[pd.DataFrame]:
         """
-        Create complete dataset with both historical and recent data
+        Create complete dataset by fetching fresh data
         
         Parameters:
         years_back (int): Years of historical data to fetch
-        include_recent (bool): Whether to include recent data via forecast API
+        include_recent (bool): Whether to include recent data updates
         
         Returns:
         pandas.DataFrame: Complete dataset ready for feature engineering
         """
         print(f"\n🚀 CREATING COMPLETE DATASET")
         print("="*60)
+        print(f"📅 Historical: {years_back} year(s) back")
+        print(f"🔄 Include recent: {include_recent}")
         
-        today = datetime.now().date()
+        all_data = []
+        today = datetime.now()
+        
+        # Fetch historical data in chunks
         archive_end = today - timedelta(days=3)  # Archive API usually has 2-3 day delay
         historical_start = today - timedelta(days=365 * years_back)
         
-        all_data = []
-        
-        # Step 1: Fetch historical data in chunks
-        print(f"\n📚 STEP 1: FETCHING HISTORICAL DATA")
-        print(f"📅 Range: {historical_start} to {archive_end}")
+        print(f"\n📈 Fetching historical data from {historical_start.date()} to {archive_end.date()}")
         
         current_date = historical_start
         chunk_size = 30  # 30 days per chunk
@@ -231,7 +195,7 @@ class OpenMeteoDataFetcher:
             chunk_end = min(current_date + timedelta(days=chunk_size), archive_end)
             chunk_count += 1
             
-            print(f"📦 Chunk {chunk_count}: {current_date} to {chunk_end}")
+            print(f"📦 Chunk {chunk_count}: {current_date.date()} to {chunk_end.date()}")
             
             chunk_data = self.fetch_historical_data(
                 current_date.strftime('%Y-%m-%d'),
@@ -246,27 +210,23 @@ class OpenMeteoDataFetcher:
             
             current_date = chunk_end + timedelta(days=1)
         
-        # Step 2: Fetch recent data if requested
+        # Fetch recent data if requested
         if include_recent:
-            print(f"\n🔄 STEP 2: FETCHING RECENT DATA (LAST 7 DAYS)")
+            print(f"\n🔄 Fetching latest data (last 2 days)")
             try:
-                recent_data = self.fetch_recent_data(days_back=7, days_forward=0)
-                
+                recent_data = self.fetch_recent_data(days_back=2, days_forward=0)
                 if recent_data is not None and len(recent_data) > 0:
                     all_data.append(recent_data)
                     print(f"✅ Recent data: {len(recent_data)} records")
-                else:
-                    print(f"⚠️ Failed to fetch recent data")
-            except Exception as recent_error:
-                print(f"⚠️ Recent data fetch failed: {recent_error}")
-                print("   Continuing without recent data...")
+            except Exception as e:
+                print(f"⚠️ Recent data fetch failed: {e}")
         
-        # Step 3: Combine all data
+        # Combine all data
         if not all_data:
             print("❌ No data collected!")
             return None
         
-        print(f"\n🔧 STEP 3: COMBINING AND CLEANING DATA")
+        print(f"\n🔧 Combining and cleaning data")
         combined_data = pd.concat(all_data, ignore_index=True)
         
         # Remove duplicates and sort
@@ -274,21 +234,151 @@ class OpenMeteoDataFetcher:
         combined_data = combined_data.drop_duplicates(subset=['datetime']).sort_values('datetime')
         print(f"📊 After deduplication: {len(combined_data)} records")
         
-        # Data quality check
-        missing_aqi = combined_data['us_aqi'].isnull().sum()
-        if missing_aqi > len(combined_data) * 0.1:  # More than 10% missing
-            print(f"⚠️ Warning: {missing_aqi} missing AQI values ({missing_aqi/len(combined_data)*100:.1f}%)")
-        
-        print(f"\n🎉 COMPLETE DATASET CREATED!")
+        print(f"\n🎉 Dataset ready!")
         print(f"📊 Total records: {len(combined_data):,}")
         print(f"📅 Date range: {combined_data['datetime'].min()} to {combined_data['datetime'].max()}")
-        print(f"🎯 Target (AQI) range: {combined_data['us_aqi'].min():.1f} - {combined_data['us_aqi'].max():.1f}")
         
         return combined_data
+        
+    def get_latest_data_timestamp(self) -> Optional[datetime]:
+        """
+        Get the latest timestamp from existing data sources
+        
+        Returns:
+        datetime: Latest timestamp or None if no data exists
+        """
+        latest_timestamps = []
+        
+        # Check Hopsworks feature store first
+        if self.hops_integration and self.hops_integration.enabled:
+            try:
+                # Check if feature group exists first
+                fg_name = "aqi_raw_features"
+                print(f"🔍 Checking if feature group {fg_name} exists...")
+                
+                try:
+                    fg = self.hops_integration.fs.get_feature_group(name=fg_name, version=1)
+                    if fg is None:
+                        print(f"📭 Feature group {fg_name} does not exist yet")
+                    else:
+                        print(f"✅ Feature group {fg_name} exists, loading data...")
+                        existing_data = self.hops_integration.load_from_feature_store(stage="raw")
+                        if existing_data is not None and len(existing_data) > 0:
+                            latest_hops = pd.to_datetime(existing_data['datetime']).max()
+                            latest_timestamps.append(latest_hops)
+                            print(f"📊 Latest in Hopsworks: {latest_hops}")
+                        else:
+                            print(f"📭 Feature group exists but contains no data")
+                except Exception as fg_error:
+                    print(f"📭 Feature group {fg_name} does not exist: {fg_error}")
+                    
+            except Exception as e:
+                print(f"⚠️ Could not check Hopsworks data: {e}")
+        
+        # Check local CSV files
+        import glob
+        csv_files = glob.glob("data/historical_*.csv") + glob.glob("data/complete_dataset_*.csv")
+        if csv_files:
+            try:
+                latest_file = max(csv_files, key=os.path.getctime)
+                print(f"📁 Checking local file: {latest_file}")
+                local_data = pd.read_csv(latest_file)
+                local_data['datetime'] = pd.to_datetime(local_data['datetime'])
+                latest_local = local_data['datetime'].max()
+                latest_timestamps.append(latest_local)
+                print(f"📁 Latest in local files: {latest_local}")
+            except Exception as e:
+                print(f"⚠️ Could not check local files: {e}")
+        
+        if latest_timestamps:
+            latest = max(latest_timestamps)
+            print(f"🕐 Latest data timestamp: {latest}")
+            return latest
+        else:
+            print(f"📭 No existing data found in Hopsworks or local files")
+            return None
+
+    def fetch_incremental_data(self, since_timestamp: datetime, max_days: int = 30) -> Optional[pd.DataFrame]:
+        """
+        Fetch data incrementally since the last timestamp
+        
+        Parameters:
+        since_timestamp (datetime): Last data timestamp
+        max_days (int): Maximum days to fetch in one go
+        
+        Returns:
+        pandas.DataFrame: New incremental data
+        """
+        now = datetime.now()
+        start_date = since_timestamp + timedelta(hours=1)  # Start from next hour
+        
+        # For archive API, use up to 3 days ago to ensure data availability
+        end_date = min(now - timedelta(days=3), start_date + timedelta(days=max_days))
+        
+        if start_date >= end_date:
+            print(f"⏰ No new data to fetch (start: {start_date}, end: {end_date})")
+            return None
+        
+        print(f"📈 Fetching incremental data from {start_date} to {end_date}")
+        
+        return self.fetch_historical_data(
+            start_date.strftime('%Y-%m-%d'),
+            end_date.strftime('%Y-%m-%d')
+        )
+
+    def setup_initial_historical_data(self, years_back: int = 1) -> bool:
+        """
+        Set up initial historical data if none exists
+        
+        Parameters:
+        years_back (int): Years of historical data to fetch
+        
+        Returns:
+        bool: Success status
+        """
+        print(f"🏗️ Setting up initial historical data ({years_back} year(s))")
+        
+        try:
+            # Use create_complete_dataset to get full historical data
+            print(f"📊 Fetching historical data...")
+            historical_data = self.create_complete_dataset(years_back=years_back, include_recent=False)
+            
+            if historical_data is None or len(historical_data) == 0:
+                print("❌ Failed to fetch initial historical data")
+                return False
+            
+            print(f"✅ Successfully fetched {len(historical_data)} historical records")
+            print(f"📅 Date range: {historical_data['datetime'].min()} to {historical_data['datetime'].max()}")
+            
+            # Save locally first (always works)
+            print(f"💾 Saving data locally...")
+            local_path = save_data_locally(historical_data, "historical_raw_data.csv")
+            print(f"✅ Saved {len(historical_data)} historical records locally: {local_path}")
+            
+            # Save to Hopsworks (might fail, but that's ok)
+            if self.hops_integration and self.hops_integration.enabled:
+                print(f"☁️ Saving data to Hopsworks feature store...")
+                success = self.hops_integration.save_to_feature_store(historical_data, stage="raw")
+                if success:
+                    print(f"✅ Saved {len(historical_data)} historical records to Hopsworks")
+                else:
+                    print("⚠️ Failed to save historical data to Hopsworks, but local save succeeded")
+                    print("   Pipeline can continue using local files")
+            else:
+                print("⚠️ Hopsworks not enabled, using local files only")
+            
+            print(f"✅ Initial historical data setup complete")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Setup failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
     def fetch_latest_data(self, hours_back: int = 48) -> Optional[pd.DataFrame]:
         """
-        Fetch latest data for real-time predictions
+        Fetch latest data for real-time predictions using archive API
         
         Parameters:
         hours_back (int): Number of hours back to fetch
@@ -296,21 +386,64 @@ class OpenMeteoDataFetcher:
         Returns:
         pandas.DataFrame: Latest weather and air quality data
         """
-        days_back = max(1, hours_back // 24 + 1)  # Convert hours to days
         print(f"🔄 Fetching latest {hours_back} hours of data...")
         
-        # Use the recent data fetcher
-        latest_data = self.fetch_recent_data(days_back=days_back, days_forward=0)
+        # Calculate date range for latest data
+        now = datetime.now()
+        start_datetime = now - timedelta(hours=hours_back)
+        end_datetime = now - timedelta(hours=2)  # 2 hours ago to ensure data availability
+        
+        start_date = start_datetime.strftime('%Y-%m-%d')
+        end_date = end_datetime.strftime('%Y-%m-%d')
+        
+        print(f"� Fetching from {start_date} to {end_date}")
+        
+        # Use the archive API for reliable data
+        latest_data = self.fetch_historical_data(start_date, end_date)
         
         if latest_data is not None:
-            # Filter to get only the requested hours
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            # Filter to get only the requested hours if we got more data
+            latest_data['datetime'] = pd.to_datetime(latest_data['datetime'])
+            cutoff_time = now - timedelta(hours=hours_back)
             latest_data = latest_data[latest_data['datetime'] >= cutoff_time]
             
             print(f"✅ Latest data fetched: {len(latest_data)} records")
-            print(f"📅 Time range: {latest_data['datetime'].min()} to {latest_data['datetime'].max()}")
+            if len(latest_data) > 0:
+                print(f"📅 Time range: {latest_data['datetime'].min()} to {latest_data['datetime'].max()}")
         
         return latest_data
+    
+    def check_existing_data(self) -> Optional[Tuple[datetime, int]]:
+        """
+        Check for existing data in both Hopsworks and local files
+        
+        Returns:
+        Tuple[datetime, int]: (latest_timestamp, record_count) or None if no data
+        """
+        latest_timestamp = self.get_latest_data_timestamp()
+        if latest_timestamp is None:
+            return None
+        
+        # Get record count
+        record_count = 0
+        if self.hops_integration and self.hops_integration.enabled:
+            try:
+                existing_data = self.hops_integration.load_from_feature_store(stage="raw")
+                if existing_data is not None:
+                    record_count = len(existing_data)
+            except:
+                pass
+        
+        if record_count == 0:
+            # Try local files
+            import glob
+            csv_files = glob.glob("data/historical_*.csv")
+            if csv_files:
+                latest_file = max(csv_files, key=os.path.getctime)
+                local_data = pd.read_csv(latest_file)
+                record_count = len(local_data)
+        
+        return (latest_timestamp, record_count) if record_count > 0 else None
 
 class HopsworksIntegration:
     """Hopsworks feature store and model registry integration"""
@@ -424,42 +557,36 @@ class HopsworksIntegration:
             # Prepare dataframe for Hopsworks
             df_copy = df.copy()
             
-            # Clean data for Hopsworks compatibility
-            # Handle null dtypes and missing values
+            # Simple data cleaning for Hopsworks compatibility
+            print(f"🧹 Cleaning data for Hopsworks...")
+            
+            # Fill null values with appropriate defaults
             for col in df_copy.columns:
-                if df_copy[col].dtype == 'object' and df_copy[col].isnull().all():
-                    # If entire column is null, fill with a default value
-                    if 'visibility' in col:
-                        df_copy[col] = 10000.0  # Default visibility in meters
-                    else:
-                        df_copy[col] = 0.0
-                elif df_copy[col].dtype == 'object':
-                    # Convert object columns to numeric if possible
-                    df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
-                
-                # Fill remaining null values
+                if col == 'datetime':
+                    continue
+                    
                 if df_copy[col].isnull().any():
-                    if df_copy[col].dtype in ['float64', 'int64']:
-                        df_copy[col] = df_copy[col].fillna(df_copy[col].median())
+                    if col == 'visibility':
+                        df_copy[col] = df_copy[col].fillna(10000.0)
+                    elif df_copy[col].dtype in ['float64', 'int64']:
+                        df_copy[col] = df_copy[col].fillna(0.0)
                     else:
-                        df_copy[col] = df_copy[col].fillna(0)
+                        df_copy[col] = df_copy[col].fillna(0.0)
             
-            # Ensure all columns have supported dtypes
+            # Ensure all numeric columns are float64
             for col in df_copy.columns:
-                if df_copy[col].dtype == 'object':
-                    df_copy[col] = df_copy[col].astype('float64')
+                if col != 'datetime':
+                    df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(0.0)
             
-            # Add integer primary key (required for online feature groups)
+            # Add integer primary key (required for feature groups)
             df_copy['id'] = range(len(df_copy))
             
-            # Ensure datetime column exists and is properly formatted
+            # Ensure datetime column is properly formatted
             if 'datetime' in df_copy.columns:
                 df_copy['datetime'] = pd.to_datetime(df_copy['datetime'])
             
-            print(f"🧹 Data cleaned for Hopsworks:")
-            print(f"   Shape: {df_copy.shape}")
-            print(f"   Dtypes: {df_copy.dtypes.value_counts().to_dict()}")
-            print(f"   Null values: {df_copy.isnull().sum().sum()}")
+            print(f"   ✅ Shape: {df_copy.shape}")
+            print(f"   ✅ Null values: {df_copy.isnull().sum().sum()}")
             
             # Configure feature group name based on stage
             fg_name = f"aqi_{stage}_features"
@@ -469,85 +596,88 @@ class HopsworksIntegration:
             
             # Get or create feature group with integer primary key
             fg = None
+            
+            # Always try to create feature group if it doesn't exist
+            print(f"🔍 Checking for existing feature group: {fg_name}")
             try:
-                # Try to get existing feature group first
-                print(f"🔍 Checking for existing feature group: {fg_name}")
                 fg = self.fs.get_feature_group(name=fg_name, version=fg_version)
                 if fg is not None:
                     print(f"📋 Using existing feature group: {fg_name}")
-                    print(f"   Feature group object: {type(fg)} - {fg}")
                 else:
-                    print(f"⚠️ get_feature_group returned None for {fg_name}")
-                    raise Exception("Feature group not found")
+                    print(f"📭 Feature group {fg_name} not found, will create new one")
+                    raise Exception("Feature group not found, creating new")
             except Exception as get_error:
                 print(f"🆕 Creating new feature group: {fg_name}")
-                print(f"   Get error: {get_error}")
-                try:
-                    # Create new feature group with proper configuration
-                    print(f"   Creating with primary_key=['id'], online_enabled=False")
-                    fg = self.fs.create_feature_group(
-                        name=fg_name,
-                        version=fg_version,
-                        description=f"AQI {stage} features with weather and air quality data",
-                        primary_key=["id"],  # Use integer primary key
-                        event_time="datetime" if "datetime" in df_copy.columns else None,
-                        online_enabled=False  # Disable online for now to avoid timestamp issues
-                    )
-                    print(f"   Feature group creation result: {fg}")
-                    if fg is None:
-                        raise Exception("Feature group creation returned None")
-                    print(f"✅ Created feature group: {fg_name}")
-                except Exception as create_error:
-                    print(f"⚠️ Failed to create with event_time: {create_error}")
-                    print("🔄 Trying simpler configuration without event_time...")
+                print(f"   Reason: {get_error}")
+                
+                # Create new feature group with robust configuration
+                creation_attempts = [
+                    # Attempt 1: With event_time
+                    {
+                        "name": fg_name,
+                        "version": fg_version,
+                        "description": f"AQI {stage} features with weather and air quality data for Lahore, Pakistan",
+                        "primary_key": ["id"],
+                        "event_time": "datetime" if "datetime" in df_copy.columns else None,
+                        "online_enabled": False
+                    },
+                    # Attempt 2: Without event_time
+                    {
+                        "name": fg_name,
+                        "version": fg_version,
+                        "description": f"AQI {stage} features with weather and air quality data",
+                        "primary_key": ["id"],
+                        "online_enabled": False
+                    },
+                    # Attempt 3: Minimal configuration
+                    {
+                        "name": fg_name,
+                        "description": f"AQI {stage} features",
+                        "primary_key": ["id"]
+                    }
+                ]
+                
+                fg_created = False
+                for i, config in enumerate(creation_attempts, 1):
                     try:
-                        # Try without event_time as fallback
-                        fg = self.fs.create_feature_group(
-                            name=fg_name,
-                            version=fg_version,
-                            description=f"AQI {stage} features with weather and air quality data",
-                            primary_key=["id"],  # Use integer primary key
-                            online_enabled=False
-                        )
-                        print(f"   Simple creation result: {fg}")
-                        if fg is None:
-                            raise Exception("Feature group creation returned None")
-                        print(f"✅ Created feature group (simple): {fg_name}")
-                    except Exception as simple_error:
-                        print(f"❌ Failed to create feature group (simple): {simple_error}")
-                        print(f"   Simple error type: {type(simple_error)}")
-                        import traceback
-                        traceback.print_exc()
-                        return False
+                        print(f"   Attempt {i}: Creating with config: {list(config.keys())}")
+                        fg = self.fs.create_feature_group(**config)
+                        if fg is not None:
+                            print(f"✅ Successfully created feature group with attempt {i}")
+                            fg_created = True
+                            break
+                        else:
+                            print(f"⚠️ Attempt {i} returned None")
+                    except Exception as create_error:
+                        print(f"⚠️ Attempt {i} failed: {create_error}")
+                        continue
+                
+                if not fg_created or fg is None:
+                    print(f"❌ All feature group creation attempts failed")
+                    return False
             
             # Verify feature group exists before inserting
             if fg is None:
                 print("❌ Feature group is None, cannot insert data")
                 return False
             
-            # Insert data using batch mode (no streaming/Kafka)
+            print(f"✅ Feature group ready: {fg_name}")
+            
+            # Insert data using direct insert
             print(f"📤 Inserting {len(df_copy)} records into {fg_name}...")
             try:
-                # Use batch insertion without streaming
-                insert_job = fg.insert(df_copy, write_options={
-                    "wait_for_job": True,  # Wait for job completion
-                    "start_offline_materialization": False  # Don't trigger streaming
-                })
+                # Simple direct insert without complex options
+                fg.insert(df_copy)
                 print(f"✅ Data inserted to feature store: {len(df_copy)} records")
-                print(f"   💡 Note: Data may take a few minutes to appear in Hopsworks UI")
-                
-                # Optional: Wait a bit for data to be available
-                import time
-                print("⏳ Waiting 30 seconds for data to be processed...")
-                time.sleep(30)
+                print(f"   💡 Data should appear in Hopsworks UI shortly")
                 
             except Exception as insert_error:
-                print(f"⚠️ Batch insert failed: {insert_error}")
-                print("🔄 Trying simple insert...")
-                # Fallback to simplest insert
-                fg.insert(df_copy)
-                print(f"✅ Data saved to feature store (simple): {len(df_copy)} records")
-                print(f"   💡 Note: Data may take a few minutes to appear in Hopsworks UI")
+                print(f"❌ Data insertion failed: {insert_error}")
+                print(f"   Error type: {type(insert_error)}")
+                import traceback
+                traceback.print_exc()
+                return False
+                return False
             
             return True
             
@@ -574,27 +704,57 @@ class HopsworksIntegration:
             fg_name = f"aqi_{stage}_features"
             print(f"📥 Loading from feature store: {fg_name} v{version}")
             
-            fg = self.fs.get_feature_group(name=fg_name, version=version)
-            
-            # Try to read data with error handling
+            # Get feature group with error handling
             try:
-                df = fg.read()
-            except Exception as read_error:
-                print(f"⚠️ Query Service read failed: {read_error}")
-                print("🔄 Trying alternative read method...")
-                # Try a simpler read without query service
-                df = fg.select_all().read()
+                fg = self.fs.get_feature_group(name=fg_name, version=version)
+                if fg is None:
+                    print(f"⚠️ Feature group {fg_name} not found")
+                    return None
+            except Exception as fg_error:
+                print(f"⚠️ Failed to get feature group {fg_name}: {fg_error}")
+                return None
+            
+            # Try multiple read methods with robust error handling
+            df = None
+            read_methods = [
+                # Method 1: Direct read (fastest)
+                lambda: fg.read(),
+                # Method 2: Select all then read
+                lambda: fg.select_all().read(),
+                # Method 3: Read with limit (if data is too large)
+                lambda: fg.select_all().limit(50000).read(),
+                # Method 4: Read without query service (offline only)
+                lambda: fg.read(online=False) if hasattr(fg, 'read') else None
+            ]
+            
+            for i, method in enumerate(read_methods, 1):
+                try:
+                    print(f"🔄 Trying read method {i}...")
+                    df = method()
+                    if df is not None and len(df) > 0:
+                        print(f"✅ Read successful with method {i}")
+                        break
+                except Exception as read_error:
+                    print(f"⚠️ Read method {i} failed: {read_error}")
+                    continue
+            
+            if df is None or len(df) == 0:
+                print(f"❌ All read methods failed or returned empty data")
+                return None
             
             # Remove the artificial 'id' column if it exists
             if 'id' in df.columns:
                 df = df.drop(columns=['id'])
             
             print(f"✅ Data loaded from feature store: {len(df)} records")
+            print(f"📅 Date range: {df['datetime'].min() if 'datetime' in df.columns else 'N/A'} to {df['datetime'].max() if 'datetime' in df.columns else 'N/A'}")
+            
             return df
             
         except Exception as e:
             print(f"❌ Feature store load failed: {e}")
             print("   Data might not be ready yet or Query Service unavailable")
+            print("   Try running the data fetching pipeline first")
             return None
     
     def save_model(self, model_dir: str, model_name: str, model_type: str = "sklearn") -> bool:
@@ -616,36 +776,57 @@ class HopsworksIntegration:
         try:
             print(f"🤖 Saving model to registry: {model_name}")
             
-            # Get or create model in registry
+            # Prepare metrics dictionary with only numeric values
+            metrics = {}
+            metadata_file = os.path.join(model_dir, "sklearn_model_metadata.json")
+            if os.path.exists(metadata_file):
+                import json
+                with open(metadata_file, 'r') as f:
+                    model_metadata = json.load(f)
+                    # Only add numeric metrics, skip framework string
+                    for key, value in model_metadata.items():
+                        if isinstance(value, (int, float)) and key in ["test_r2", "test_rmse", "test_mae", "train_r2", "cv_score"]:
+                            metrics[key] = float(value)
+            
+            # Add default metrics if none found
+            if not metrics:
+                metrics = {"test_rmse": 0.0, "test_r2": 0.0}
+            
+            # Create new model (always create new version to avoid conflicts)
+            print(f"🆕 Creating new model: {model_name}")
+            
+            # Use python client interface for model creation
             try:
-                # Try to get existing model
-                model = self.mr.get_model(name=model_name, version=1)
-                print(f"📋 Using existing model: {model_name}")
-            except Exception:
-                # Create new model
-                print(f"🆕 Creating new model: {model_name}")
-                
-                # Calculate model schema/metrics from metadata if available
-                metrics = {"framework": model_type}
-                metadata_file = os.path.join(model_dir, "sklearn_model_metadata.json")
-                if os.path.exists(metadata_file):
-                    import json
-                    with open(metadata_file, 'r') as f:
-                        model_metadata = json.load(f)
-                        metrics.update({
-                            "test_r2": model_metadata.get("test_r2", 0),
-                            "test_rmse": model_metadata.get("test_rmse", 0),
-                            "test_mae": model_metadata.get("test_mae", 0)
-                        })
-                
-                model = self.mr.create_model(
+                model = self.mr.python.create_model(
                     name=model_name,
-                    version=1,
                     description=f"AQI prediction model - {model_type}",
                     metrics=metrics
                 )
+                
+                if model is None:
+                    raise Exception("Model creation returned None")
+                    
+                print(f"✅ Created model: {model_name} v{model.version}")
+                
+            except Exception as create_error:
+                print(f"⚠️ Failed with python client, trying standard client: {create_error}")
+                # Fallback to standard client
+                model = self.mr.create_model(
+                    name=model_name,
+                    description=f"AQI prediction model - {model_type}",
+                    metrics=metrics
+                )
+                
+                if model is None:
+                    raise Exception("Standard model creation also returned None")
+            
+            # Verify model object before saving
+            if not hasattr(model, 'save'):
+                raise Exception(f"Model object does not have 'save' method. Type: {type(model)}")
             
             # Save model files to registry
+            print(f"📤 Uploading model files from: {model_dir}")
+            
             if os.path.isdir(model_dir):
                 model.save(model_dir)
             else:
@@ -662,6 +843,53 @@ class HopsworksIntegration:
         except Exception as e:
             print(f"❌ Model registry save failed: {e}")
             print(f"   Error details: {type(e).__name__}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def clean_test_data(self):
+        """Clean test data from Hopsworks feature store"""
+        if not self.enabled:
+            print("⚠️ Hopsworks not enabled")
+            return False
+        
+        try:
+            print("🧹 Cleaning test data from Hopsworks...")
+            
+            # List of test feature groups to clean
+            test_stages = ["test", "raw"]  # Clean both test and raw stages
+            
+            for stage in test_stages:
+                fg_name = f"aqi_{stage}_features"
+                try:
+                    fg = self.fs.get_feature_group(name=fg_name, version=1)
+                    if fg is not None:
+                        print(f"🗑️ Deleting feature group: {fg_name}")
+                        fg.delete()
+                        print(f"✅ Deleted {fg_name}")
+                except Exception as e:
+                    print(f"⚠️ Could not delete {fg_name}: {e}")
+            
+            # Clean test models from model registry
+            try:
+                test_models = ["test_aqi_model", "test_aqi_pipeline_model"]
+                for model_name in test_models:
+                    try:
+                        models = self.mr.get_models(name=model_name)
+                        for model in models:
+                            print(f"🗑️ Deleting model: {model_name} v{model.version}")
+                            model.delete()
+                            print(f"✅ Deleted {model_name} v{model.version}")
+                    except Exception as e:
+                        print(f"⚠️ Could not delete model {model_name}: {e}")
+            except Exception as e:
+                print(f"⚠️ Model cleanup error: {e}")
+            
+            print("✅ Test data cleanup completed")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Cleanup failed: {e}")
             return False
 
 def save_data_locally(df: pd.DataFrame, filename: str, data_dir: str = "data") -> str:
@@ -679,33 +907,229 @@ def save_data_locally(df: pd.DataFrame, filename: str, data_dir: str = "data") -
     print(f"💾 Data saved locally: {filepath}")
     return filepath
 
+def run_hourly_data_pipeline():
+    """
+    Hourly pipeline: Fetch incremental data and update feature store
+    """
+    print("🔄 HOURLY DATA PIPELINE")
+    print("="*50)
+    
+    try:
+        fetcher = OpenMeteoDataFetcher()
+        
+        # Check for existing data
+        latest_timestamp = fetcher.get_latest_data_timestamp()
+        
+        if latest_timestamp is None:
+            print("📭 No existing data found, setting up initial historical data...")
+            success = fetcher.setup_initial_historical_data(years_back=1)
+            if success:
+                print("✅ Initial historical data setup complete")
+                return True
+            else:
+                print("❌ Failed to set up initial data")
+                return False
+        
+        # Check if we need to fetch incremental data
+        now = datetime.now()
+        hours_since_last = (now - latest_timestamp).total_seconds() / 3600
+        
+        if hours_since_last < 1:
+            print(f"⏰ Data is recent ({hours_since_last:.1f} hours old), no update needed")
+            return True
+        
+        print(f"📊 Last data: {latest_timestamp} ({hours_since_last:.1f} hours ago)")
+        
+        # Fetch incremental data
+        new_data = fetcher.fetch_incremental_data(latest_timestamp)
+        
+        if new_data is None or len(new_data) == 0:
+            print("📭 No new data available")
+            return True
+        
+        print(f"📈 Fetched {len(new_data)} new records")
+        
+        # Save locally (append to existing) - this always works
+        local_path = save_data_locally(new_data, "incremental_data.csv")
+        print(f"💾 Saved incremental data locally: {local_path}")
+        
+        # Save to Hopsworks - optional, pipeline continues if this fails
+        hopsworks_success = False
+        if fetcher.hops_integration and fetcher.hops_integration.enabled:
+            try:
+                success = fetcher.hops_integration.save_to_feature_store(new_data, stage="raw")
+                if success:
+                    print(f"☁️ Appended {len(new_data)} records to Hopsworks feature store")
+                    hopsworks_success = True
+                else:
+                    print("⚠️ Failed to save incremental data to Hopsworks")
+            except Exception as e:
+                print(f"⚠️ Hopsworks save failed: {e}")
+        
+        if hopsworks_success:
+            print("✅ Hourly pipeline completed successfully (Hopsworks + Local)")
+        else:
+            print("✅ Hourly pipeline completed successfully (Local only)")
+            print("   Data saved locally, can be used for training")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Hourly pipeline failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def run_daily_model_pipeline():
+    """
+    Daily pipeline: Load latest data, perform feature engineering, and train models
+    """
+    print("🤖 DAILY MODEL TRAINING PIPELINE")
+    print("="*50)
+    
+    try:
+        # Load latest data from Hopsworks or local files
+        fetcher = OpenMeteoDataFetcher()
+        raw_data = None
+        
+        # Try loading from Hopsworks first
+        if fetcher.hops_integration and fetcher.hops_integration.enabled:
+            print("📥 Loading data from Hopsworks feature store...")
+            raw_data = fetcher.hops_integration.load_from_feature_store(stage="raw")
+        
+        # If Hopsworks fails, try local files as fallback
+        if raw_data is None or len(raw_data) == 0:
+            print("⚠️ No data in Hopsworks, trying local files...")
+            import glob
+            import pandas as pd
+            
+            # Look for local data files
+            csv_files = glob.glob("data/historical_*.csv") + glob.glob("data/complete_dataset_*.csv")
+            if csv_files:
+                latest_file = max(csv_files, key=os.path.getctime)
+                print(f"📁 Loading from local file: {latest_file}")
+                raw_data = pd.read_csv(latest_file)
+                raw_data['datetime'] = pd.to_datetime(raw_data['datetime'])
+                print(f"✅ Loaded {len(raw_data)} records from local file")
+            else:
+                print("❌ No local data files found either")
+                print("   Please run the data fetching pipeline first:")
+                print("   python scripts/fetch_hourly_data.py")
+                return False
+        
+        if raw_data is None or len(raw_data) == 0:
+            print("❌ No data available for training")
+            return False
+        
+        print(f"📊 Using {len(raw_data)} records for training")
+        print(f"📅 Date range: {raw_data['datetime'].min()} to {raw_data['datetime'].max()}")
+        
+        # Feature engineering
+        print("🔧 Performing feature engineering...")
+        from features.feature_engineering import FeatureEngineer, AdvancedFeatureSelector
+        
+        engineer = FeatureEngineer()
+        engineered_data = engineer.engineer_features(raw_data)
+        engineered_data = engineer.handle_missing_values(engineered_data)
+        
+        # Save engineered features to Hopsworks (if available)
+        if fetcher.hops_integration and fetcher.hops_integration.enabled:
+            success = fetcher.hops_integration.save_to_feature_store(engineered_data, stage="engineered")
+            if success:
+                print(f"☁️ Saved engineered features to Hopsworks")
+            else:
+                print(f"⚠️ Failed to save engineered features to Hopsworks")
+        
+        # Feature selection
+        print("🎯 Performing feature selection...")
+        selector = AdvancedFeatureSelector()
+        selected_data, selected_features = selector.select_features(engineered_data, max_features=20)
+        
+        # Save selected features to Hopsworks (if available)
+        if fetcher.hops_integration and fetcher.hops_integration.enabled:
+            success = fetcher.hops_integration.save_to_feature_store(selected_data, stage="selected")
+            if success:
+                print(f"☁️ Saved selected features to Hopsworks")
+            else:
+                print(f"⚠️ Failed to save selected features to Hopsworks")
+        
+        print(f"🎯 Selected {len(selected_features)} features for training")
+        
+        # Train models
+        print("🚀 Training models...")
+        from models.train_sklearn import SklearnModelTrainer
+        
+        trainer = SklearnModelTrainer()
+        results = trainer.train_all_models(selected_data, test_size=0.2)
+        
+        # Save best model (automatically uploads to Hopsworks if available)
+        model_path = trainer.save_best_model()
+        
+        print(f"✅ Daily model pipeline completed successfully")
+        print(f"🏆 Best model: {trainer.best_model_name}")
+        print(f"📁 Model saved: {model_path}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Daily pipeline failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+        
+        # Save engineered features to Hopsworks
+        success = fetcher.hops_integration.save_to_feature_store(engineered_data, stage="engineered")
+        if success:
+            print(f"☁️ Saved engineered features to Hopsworks")
+        
+        # Feature selection
+        selector = AdvancedFeatureSelector()
+        selected_data, selected_features = selector.select_features(engineered_data, max_features=20)
+        
+        # Save selected features to Hopsworks
+        success = fetcher.hops_integration.save_to_feature_store(selected_data, stage="selected")
+        if success:
+            print(f"☁️ Saved selected features to Hopsworks")
+        
+        print(f"🎯 Selected {len(selected_features)} features for training")
+        
+        # Train models
+        print("🚀 Training models...")
+        from models.train_sklearn import SklearnModelTrainer
+        
+        trainer = SklearnModelTrainer()
+        results = trainer.train_all_models(selected_data, test_size=0.2)
+        
+        # Save best model (automatically uploads to Hopsworks)
+        model_path = trainer.save_best_model()
+        
+        print(f"✅ Daily model pipeline completed successfully")
+        print(f"🏆 Best model: {trainer.best_model_name}")
+        print(f"📁 Model saved: {model_path}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Daily pipeline failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main():
-    """Test the enhanced data fetching pipeline"""
-    print("🚀 Testing Enhanced AQI Data Fetching Pipeline")
-    print("="*60)
+    """Main function for testing pipelines"""
+    import sys
     
-    # Initialize fetcher
-    fetcher = OpenMeteoDataFetcher()
-    
-    # Test complete dataset creation
-    print("🧪 Testing complete dataset creation...")
-    complete_data = fetcher.create_complete_dataset(years_back=1, include_recent=False)  # Skip recent data for now
-    
-    if complete_data is not None:
-        # Save locally
-        save_data_locally(complete_data, "complete_dataset.csv")
-        
-        # Test Hopsworks integration
-        hops = HopsworksIntegration()
-        if hops.enabled:
-            hops.save_to_feature_store(complete_data, stage="raw")
-        
-        print(f"\n✅ Pipeline test completed successfully!")
-        print(f"📊 Final dataset shape: {complete_data.shape}")
-        print(f"📅 Date coverage: {complete_data['datetime'].min()} to {complete_data['datetime'].max()}")
-        
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "hourly":
+            run_hourly_data_pipeline()
+        elif sys.argv[1] == "daily":
+            run_daily_model_pipeline()
+        else:
+            print("Usage: python fetch_data.py [hourly|daily]")
     else:
-        print("❌ Pipeline test failed!")
+        print("🧪 Running test mode...")
+        print("Use 'python fetch_data.py hourly' for hourly data pipeline")
+        print("Use 'python fetch_data.py daily' for daily model pipeline")
 
 if __name__ == "__main__":
     main()

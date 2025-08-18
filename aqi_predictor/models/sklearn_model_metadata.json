@@ -1,0 +1,32 @@
+{
+  "model_name": "Random Forest",
+  "model_type": "sklearn",
+  "target_variable": "us_aqi",
+  "test_r2": 0.6882551551771516,
+  "test_rmse": 26.38949786348951,
+  "test_mae": 17.734309891345163,
+  "is_healthy": true,
+  "feature_columns": [
+    "month",
+    "month_cos",
+    "pressure_msl",
+    "dew_point",
+    "sulphur_dioxide",
+    "heat_index",
+    "month_sin",
+    "temperature",
+    "season",
+    "sulphur_dioxide_change_3h",
+    "carbon_monoxide",
+    "wind_chill",
+    "sulphur_dioxide_change_1h",
+    "humidity_no2",
+    "humidity",
+    "day_of_week",
+    "sulphur_dioxide_pct_change_1h",
+    "day_sin",
+    "temp_ozone",
+    "temp_wind"
+  ],
+  "timestamp": "2025-08-15T08:35:05.828533"
+}
