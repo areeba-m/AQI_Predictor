@@ -8,13 +8,105 @@ import numpy as np
 import requests
 import json
 import os
+import sys
+import glob
+import tempfile
+import shutil
+import traceback
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import yaml
 
 # Lahore coordinates
 LAHORE_LAT = 31.5204
 LAHORE_LON = 74.3587
+
+# Helper functions
+def log_error(msg: str, e: Exception) -> None:
+    """Centralized error logging helper"""
+    print(f"❌ {msg}: {e}")
+    print(f"   Error type: {type(e).__name__}")
+    traceback.print_exc()
+
+def safe_save(fetcher, df: pd.DataFrame, stage: str) -> bool:
+    """Helper to safely save data to Hopsworks if enabled"""
+    if not fetcher.hops_integration or not fetcher.hops_integration.enabled:
+        print(f"⚠️ Hopsworks not enabled, skipping {stage} save")
+        return False
+    
+    try:
+        success = fetcher.hops_integration.save_to_feature_store(df, stage=stage)
+        if success:
+            print(f"☁️ Saved {stage} features to Hopsworks: {len(df)} records")
+        else:
+            print(f"⚠️ Failed to save {stage} features to Hopsworks")
+        return success
+    except Exception as e:
+        log_error(f"Hopsworks {stage} save failed", e)
+        return False
+
+def load_latest_data(fetcher) -> Optional[pd.DataFrame]:
+    """Helper to load latest data from Hopsworks first, then local files"""
+    raw_data = None
+    
+    # Try loading from Hopsworks first
+    if fetcher.hops_integration and fetcher.hops_integration.enabled:
+        print("📥 Loading data from Hopsworks feature store...")
+        try:
+            raw_data = fetcher.hops_integration.load_from_feature_store(stage="raw")
+            if raw_data is not None and len(raw_data) > 0:
+                print(f"✅ Loaded {len(raw_data)} records from Hopsworks")
+                return raw_data
+        except Exception as e:
+            log_error("Failed to load from Hopsworks", e)
+    
+    # Try local files as fallback
+    print("⚠️ No data in Hopsworks, trying local files...")
+    csv_files = glob.glob("data/historical_*.csv") + glob.glob("data/complete_dataset_*.csv")
+    if csv_files:
+        try:
+            latest_file = max(csv_files, key=os.path.getctime)
+            print(f"📁 Loading from local file: {latest_file}")
+            raw_data = pd.read_csv(latest_file)
+            raw_data['datetime'] = pd.to_datetime(raw_data['datetime'])
+            print(f"✅ Loaded {len(raw_data)} records from local file")
+            return raw_data
+        except Exception as e:
+            log_error("Failed to load from local files", e)
+    
+    print("❌ No local data files found")
+    return None
+
+def save_with_timestamp(df: pd.DataFrame, filename: str, data_dir: str = "data") -> str:
+    """Helper to save DataFrame locally with timestamp"""
+    os.makedirs(data_dir, exist_ok=True)
+    
+    # Add timestamp to filename if it's the main dataset
+    if filename in ['historical_raw_data.csv', 'complete_dataset.csv']:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        name, ext = filename.split('.')
+        filename = f"{name}_{timestamp}.{ext}"
+    
+    filepath = os.path.join(data_dir, filename)
+    df.to_csv(filepath, index=False)
+    print(f"💾 Data saved locally: {filepath}")
+    return filepath
+
+def fetch_data_for_period(fetcher, start_date: str, end_date: str, description: str = "") -> Optional[pd.DataFrame]:
+    """Helper to fetch data for a specific period with consistent error handling"""
+    print(f"📊 Fetching {description} data from {start_date} to {end_date}...")
+    
+    try:
+        data = fetcher.fetch_historical_data(start_date, end_date)
+        if data is not None and len(data) > 0:
+            print(f"✅ {description} data fetched: {len(data)} records")
+            return data
+        else:
+            print(f"⚠️ No {description} data available for this period")
+            return None
+    except Exception as e:
+        log_error(f"{description} data fetch failed", e)
+        return None
 
 class OpenMeteoDataFetcher:
     """Enhanced data fetcher with historical + recent data capability"""
@@ -181,64 +273,67 @@ class OpenMeteoDataFetcher:
         all_data = []
         today = datetime.now()
         
-        # Fetch historical data in chunks
-        archive_end = today - timedelta(days=3)  # Archive API usually has 2-3 day delay
-        historical_start = today - timedelta(days=365 * years_back)
-        
-        print(f"\n📈 Fetching historical data from {historical_start.date()} to {archive_end.date()}")
-        
-        current_date = historical_start
-        chunk_size = 30  # 30 days per chunk
-        chunk_count = 0
-        
-        while current_date <= archive_end:
-            chunk_end = min(current_date + timedelta(days=chunk_size), archive_end)
-            chunk_count += 1
+        try:
+            # Fetch historical data in chunks
+            archive_end = today - timedelta(days=3)  # Archive API usually has 2-3 day delay
+            historical_start = today - timedelta(days=365 * years_back)
             
-            print(f"📦 Chunk {chunk_count}: {current_date.date()} to {chunk_end.date()}")
+            print(f"\n📈 Fetching historical data from {historical_start.date()} to {archive_end.date()}")
             
-            chunk_data = self.fetch_historical_data(
-                current_date.strftime('%Y-%m-%d'),
-                chunk_end.strftime('%Y-%m-%d')
-            )
+            current_date = historical_start
+            chunk_size = 30  # 30 days per chunk
+            chunk_count = 0
             
-            if chunk_data is not None and len(chunk_data) > 0:
-                all_data.append(chunk_data)
-                print(f"✅ Chunk {chunk_count}: {len(chunk_data)} records")
-            else:
-                print(f"⚠️ Chunk {chunk_count}: Failed to fetch data")
+            while current_date <= archive_end:
+                chunk_end = min(current_date + timedelta(days=chunk_size), archive_end)
+                chunk_count += 1
+                
+                chunk_data = fetch_data_for_period(
+                    self,
+                    current_date.strftime('%Y-%m-%d'),
+                    chunk_end.strftime('%Y-%m-%d'),
+                    f"Chunk {chunk_count}"
+                )
+                
+                if chunk_data is not None:
+                    all_data.append(chunk_data)
+                
+                current_date = chunk_end + timedelta(days=1)
             
-            current_date = chunk_end + timedelta(days=1)
-        
-        # Fetch recent data if requested
-        if include_recent:
-            print(f"\n🔄 Fetching latest data (last 2 days)")
-            try:
-                recent_data = self.fetch_recent_data(days_back=2, days_forward=0)
-                if recent_data is not None and len(recent_data) > 0:
+            # Fetch recent data if requested
+            if include_recent:
+                print(f"\n🔄 Fetching latest data (last 2 days)")
+                recent_data = fetch_data_for_period(
+                    self,
+                    (today - timedelta(days=2)).strftime('%Y-%m-%d'),
+                    (today - timedelta(days=1)).strftime('%Y-%m-%d'),
+                    "Recent"
+                )
+                if recent_data is not None:
                     all_data.append(recent_data)
-                    print(f"✅ Recent data: {len(recent_data)} records")
-            except Exception as e:
-                print(f"⚠️ Recent data fetch failed: {e}")
-        
-        # Combine all data
-        if not all_data:
-            print("❌ No data collected!")
+            
+            # Combine all data
+            if not all_data:
+                print("❌ No data collected!")
+                return None
+            
+            print(f"\n🔧 Combining and cleaning data")
+            combined_data = pd.concat(all_data, ignore_index=True)
+            
+            # Remove duplicates and sort
+            print(f"📊 Before deduplication: {len(combined_data)} records")
+            combined_data = combined_data.drop_duplicates(subset=['datetime']).sort_values('datetime')
+            print(f"📊 After deduplication: {len(combined_data)} records")
+            
+            print(f"\n🎉 Dataset ready!")
+            print(f"📊 Total records: {len(combined_data):,}")
+            print(f"📅 Date range: {combined_data['datetime'].min()} to {combined_data['datetime'].max()}")
+            
+            return combined_data
+            
+        except Exception as e:
+            log_error("Dataset creation failed", e)
             return None
-        
-        print(f"\n🔧 Combining and cleaning data")
-        combined_data = pd.concat(all_data, ignore_index=True)
-        
-        # Remove duplicates and sort
-        print(f"📊 Before deduplication: {len(combined_data)} records")
-        combined_data = combined_data.drop_duplicates(subset=['datetime']).sort_values('datetime')
-        print(f"📊 After deduplication: {len(combined_data)} records")
-        
-        print(f"\n🎉 Dataset ready!")
-        print(f"📊 Total records: {len(combined_data):,}")
-        print(f"📅 Date range: {combined_data['datetime'].min()} to {combined_data['datetime'].max()}")
-        
-        return combined_data
         
     def get_latest_data_timestamp(self) -> Optional[datetime]:
         """
@@ -309,22 +404,27 @@ class OpenMeteoDataFetcher:
         Returns:
         pandas.DataFrame: New incremental data
         """
-        now = datetime.now()
-        start_date = since_timestamp + timedelta(hours=1)  # Start from next hour
-        
-        # For archive API, use up to 3 days ago to ensure data availability
-        end_date = min(now - timedelta(days=3), start_date + timedelta(days=max_days))
-        
-        if start_date >= end_date:
-            print(f"⏰ No new data to fetch (start: {start_date}, end: {end_date})")
+        try:
+            now = datetime.now()
+            start_date = since_timestamp + timedelta(hours=1)  # Start from next hour
+            
+            # For archive API, use up to 3 days ago to ensure data availability
+            end_date = min(now - timedelta(days=3), start_date + timedelta(days=max_days))
+            
+            if start_date >= end_date:
+                print(f"⏰ No new data to fetch (start: {start_date}, end: {end_date})")
+                return None
+            
+            return fetch_data_for_period(
+                self,
+                start_date.strftime('%Y-%m-%d'),
+                end_date.strftime('%Y-%m-%d'),
+                "Incremental"
+            )
+            
+        except Exception as e:
+            log_error("Incremental data fetch failed", e)
             return None
-        
-        print(f"📈 Fetching incremental data from {start_date} to {end_date}")
-        
-        return self.fetch_historical_data(
-            start_date.strftime('%Y-%m-%d'),
-            end_date.strftime('%Y-%m-%d')
-        )
 
     def setup_initial_historical_data(self, years_back: int = 1) -> bool:
         """
@@ -352,28 +452,21 @@ class OpenMeteoDataFetcher:
             
             # Save locally first (always works)
             print(f"💾 Saving data locally...")
-            local_path = save_data_locally(historical_data, "historical_raw_data.csv")
+            local_path = save_with_timestamp(historical_data, "historical_raw_data.csv")
             print(f"✅ Saved {len(historical_data)} historical records locally: {local_path}")
             
-            # Save to Hopsworks (might fail, but that's ok)
-            if self.hops_integration and self.hops_integration.enabled:
-                print(f"☁️ Saving data to Hopsworks feature store...")
-                success = self.hops_integration.save_to_feature_store(historical_data, stage="raw")
-                if success:
-                    print(f"✅ Saved {len(historical_data)} historical records to Hopsworks")
-                else:
-                    print("⚠️ Failed to save historical data to Hopsworks, but local save succeeded")
-                    print("   Pipeline can continue using local files")
-            else:
-                print("⚠️ Hopsworks not enabled, using local files only")
+            # Save to Hopsworks using helper function
+            hopsworks_success = safe_save(self, historical_data, "raw")
+            
+            if not hopsworks_success:
+                print("⚠️ Failed to save historical data to Hopsworks, but local save succeeded")
+                print("   Pipeline can continue using local files")
             
             print(f"✅ Initial historical data setup complete")
             return True
             
         except Exception as e:
-            print(f"❌ Setup failed: {e}")
-            import traceback
-            traceback.print_exc()
+            log_error("Initial historical data setup failed", e)
             return False
     
     def fetch_latest_data(self, hours_back: int = 48) -> Optional[pd.DataFrame]:
@@ -531,11 +624,8 @@ class HopsworksIntegration:
             print("   Run: pip install hopsworks")
             self.enabled = False
         except Exception as e:
-            print(f"❌ Hopsworks connection failed: {e}")
-            print(f"   Error type: {type(e)}")
+            log_error("Hopsworks connection failed", e)
             print("   Please check your API key and project name in .env file")
-            import traceback
-            traceback.print_exc()
             self.enabled = False
     
     def save_to_feature_store(self, df: pd.DataFrame, stage: str = "raw") -> bool:
@@ -573,9 +663,27 @@ class HopsworksIntegration:
                     else:
                         df_copy[col] = df_copy[col].fillna(0.0)
             
-            # Ensure all numeric columns are float64
+            # Define columns that should be integers in Hopsworks
+            # Note: Keep this list conservative - only include columns we're sure should be integers
+            integer_columns = [
+                'humidity',           # 0-100 percentage  
+                'weather_code',       # API weather codes
+                'cloud_cover',        # 0-100 percentage
+                'wind_direction',     # 0-360 degrees
+                'us_aqi',            # AQI values are typically whole numbers
+                # Note: uv_index removed - Hopsworks expects it as double
+                # Note: precipitation, rain, snowfall can be fractional so keeping as float
+            ]
+            
+            # Convert data types appropriately for Hopsworks compatibility
             for col in df_copy.columns:
-                if col != 'datetime':
+                if col == 'datetime':
+                    continue
+                elif col in integer_columns:
+                    # Convert to integers (fill NaN with 0 first)
+                    df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(0.0).astype('int64')
+                else:
+                    # Keep as float for other numeric columns
                     df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(0.0)
             
             # Add integer primary key (required for feature groups)
@@ -584,6 +692,12 @@ class HopsworksIntegration:
             # Ensure datetime column is properly formatted
             if 'datetime' in df_copy.columns:
                 df_copy['datetime'] = pd.to_datetime(df_copy['datetime'])
+            
+            # Debug: Print data types to help identify schema issues
+            print(f"🔍 Data types for Hopsworks compatibility:")
+            for col in df_copy.columns:
+                dtype = df_copy[col].dtype
+                print(f"   {col}: {dtype}")
             
             print(f"   ✅ Shape: {df_copy.shape}")
             print(f"   ✅ Null values: {df_copy.isnull().sum().sum()}")
@@ -594,21 +708,61 @@ class HopsworksIntegration:
             
             print(f"💾 Saving to feature store: {fg_name} v{fg_version}")
             
-            # Get or create feature group with integer primary key
+            # Get or create feature group with schema compatibility checking
             fg = None
             
-            # Always try to create feature group if it doesn't exist
+            # Check for existing feature group and schema compatibility
             print(f"🔍 Checking for existing feature group: {fg_name}")
             try:
                 fg = self.fs.get_feature_group(name=fg_name, version=fg_version)
                 if fg is not None:
-                    print(f"📋 Using existing feature group: {fg_name}")
+                    print(f"📋 Found existing feature group: {fg_name}")
+                    
+                    # Check schema compatibility
+                    print(f"🔍 Checking schema compatibility...")
+                    existing_schema = {f.name: f.type for f in fg.features}
+                    new_columns = set(df_copy.columns)
+                    existing_columns = set(existing_schema.keys())
+                    
+                    missing_in_new = existing_columns - new_columns
+                    extra_in_new = new_columns - existing_columns
+                    
+                    schema_compatible = len(missing_in_new) == 0 and len(extra_in_new) == 0
+                    
+                    if schema_compatible:
+                        print(f"✅ Schema is compatible, will update existing data")
+                    else:
+                        print(f"⚠️ Schema mismatch detected:")
+                        if missing_in_new:
+                            print(f"   Missing columns in new data: {list(missing_in_new)}")
+                        if extra_in_new:
+                            print(f"   Extra columns in new data: {list(extra_in_new)}")
+                        
+                        print(f"🔄 Since full pipeline is running, will recreate feature group with new schema")
+                        print(f"💡 This will overwrite all previous data as requested")
+                        
+                        # Delete existing feature group
+                        print(f"🗑️ Deleting existing feature group: {fg_name}")
+                        try:
+                            fg.delete()
+                            print(f"✅ Successfully deleted existing feature group")
+                            fg = None  # Set to None to trigger recreation
+                        except Exception as delete_error:
+                            print(f"⚠️ Failed to delete feature group: {delete_error}")
+                            print(f"   Will try creating a new version instead")
+                            fg_version += 1
+                            fg = None
                 else:
                     print(f"📭 Feature group {fg_name} not found, will create new one")
                     raise Exception("Feature group not found, creating new")
             except Exception as get_error:
-                print(f"🆕 Creating new feature group: {fg_name}")
-                print(f"   Reason: {get_error}")
+                print(f"🆕 Will create feature group: {fg_name}")
+                if "not found" not in str(get_error).lower():
+                    print(f"   Reason: {get_error}")
+            
+            # Create feature group if needed
+            if fg is None:
+                print(f"🔧 Creating new feature group: {fg_name} v{fg_version}")
                 
                 # Create new feature group with robust configuration
                 creation_attempts = [
@@ -616,7 +770,7 @@ class HopsworksIntegration:
                     {
                         "name": fg_name,
                         "version": fg_version,
-                        "description": f"AQI {stage} features with weather and air quality data for Lahore, Pakistan",
+                        "description": f"AQI {stage} features with weather and air quality data for Lahore, Pakistan (Schema updated: {datetime.now().strftime('%Y-%m-%d')})",
                         "primary_key": ["id"],
                         "event_time": "datetime" if "datetime" in df_copy.columns else None,
                         "online_enabled": False
@@ -672,17 +826,93 @@ class HopsworksIntegration:
                 print(f"   💡 Data should appear in Hopsworks UI shortly")
                 
             except Exception as insert_error:
-                print(f"❌ Data insertion failed: {insert_error}")
-                print(f"   Error type: {type(insert_error)}")
-                import traceback
-                traceback.print_exc()
-                return False
-                return False
+                # Check if it's a schema mismatch error
+                error_msg = str(insert_error)
+                
+                if "Features are not compatible" in error_msg:
+                    print(f"🔧 Schema compatibility issue detected...")
+                    
+                    # Check if it's a column mismatch (missing/extra columns) vs type mismatch
+                    if "is missing from input dataframe" in error_msg or "does not exist in feature group" in error_msg:
+                        print(f"   ❌ Column schema mismatch - feature group has different columns than current data")
+                        print(f"   💡 This happens when feature engineering changes between pipeline runs")
+                        print(f"   🔄 The feature group schema was already updated during this run")
+                        print(f"   ⚠️ If you're still seeing this error, there may be a race condition")
+                        print(f"   🔧 Try running the pipeline again, or check Hopsworks UI for schema updates")
+                        
+                        # Show details about the mismatch
+                        lines = error_msg.split('\n')
+                        for line in lines:
+                            if "is missing from input dataframe" in line or "does not exist in feature group" in line:
+                                print(f"       {line.strip()}")
+                        
+                        log_error("Schema column mismatch - feature group may need manual cleanup", insert_error)
+                        return False
+                        
+                    elif "has the wrong type" in error_msg:
+                        print(f"   🔧 Data type mismatch detected, attempting to fix...")
+                        
+                        # Try to automatically fix type issues
+                        try:
+                            # Parse the error message to find problematic columns and their expected types
+                            problem_columns = {}  # col_name -> expected_type
+                            
+                            if "has the wrong type" in error_msg:
+                                lines = error_msg.split('\n')
+                                for line in lines:
+                                    if "has the wrong type" in line and "expected type:" in line:
+                                        # Extract column name (before the first parenthesis, remove "- " prefix)
+                                        col_part = line.split('(')[0].strip()
+                                        if col_part.startswith('- '):
+                                            col_name = col_part[2:].strip()  # Remove "- " prefix
+                                        else:
+                                            col_name = col_part.strip()
+                                    
+                                    # Extract expected type
+                                    if "expected type: 'bigint'" in line:
+                                        expected_type = 'bigint'
+                                    elif "expected type: 'double'" in line:
+                                        expected_type = 'double'
+                                    else:
+                                        expected_type = 'unknown'
+                                    
+                                        if col_name and col_name in df_copy.columns:
+                                            problem_columns[col_name] = expected_type
+                            
+                            # Convert problematic columns to the expected types
+                            for col, expected_type in problem_columns.items():
+                                if expected_type == 'bigint':
+                                    print(f"   🔧 Converting {col} to integer (bigint)...")
+                                    df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(0.0).astype('int64')
+                                elif expected_type == 'double':
+                                    print(f"   🔧 Converting {col} to float (double)...")
+                                    df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(0.0).astype('float64')
+                                else:
+                                    print(f"   ⚠️ Unknown expected type for {col}: {expected_type}")
+                            
+                            if problem_columns:
+                                print(f"   🔄 Retrying data insertion with fixed types...")
+                                fg.insert(df_copy)
+                                print(f"✅ Data inserted successfully after type fixes: {len(df_copy)} records")
+                                return True
+                            else:
+                                print(f"   ⚠️ Could not automatically identify problematic columns from error message:")
+                                print(f"       {error_msg[:200]}...")  # Show first 200 chars of error
+                                log_error("Data insertion failed", insert_error)
+                                return False
+                                
+                        except Exception as fix_error:
+                            print(f"   ⚠️ Auto-fix attempt failed: {fix_error}")
+                            log_error("Data insertion failed", insert_error)
+                            return False
+                else:
+                    log_error("Data insertion failed", insert_error)
+                    return False
             
             return True
             
         except Exception as e:
-            print(f"❌ Feature store save failed: {e}")
+            log_error("Feature store save failed", e)
             return False
     
     def load_from_feature_store(self, stage: str = "selected", version: int = 1) -> Optional[pd.DataFrame]:
@@ -841,10 +1071,7 @@ class HopsworksIntegration:
             return True
             
         except Exception as e:
-            print(f"❌ Model registry save failed: {e}")
-            print(f"   Error details: {type(e).__name__}")
-            import traceback
-            traceback.print_exc()
+            log_error("Model registry save failed", e)
             return False
     
     def clean_test_data(self):
@@ -889,27 +1116,62 @@ class HopsworksIntegration:
             return True
             
         except Exception as e:
-            print(f"❌ Cleanup failed: {e}")
+            log_error("Test data cleanup failed", e)
             return False
-
-def save_data_locally(df: pd.DataFrame, filename: str, data_dir: str = "data") -> str:
-    """Save DataFrame locally with timestamp"""
-    os.makedirs(data_dir, exist_ok=True)
     
-    # Add timestamp to filename if it's the main dataset
-    if filename in ['historical_raw_data.csv', 'complete_dataset.csv']:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        name, ext = filename.split('.')
-        filename = f"{name}_{timestamp}.{ext}"
-    
-    filepath = os.path.join(data_dir, filename)
-    df.to_csv(filepath, index=False)
-    print(f"💾 Data saved locally: {filepath}")
-    return filepath
+    def clean_all_feature_groups(self, confirm: bool = False):
+        """
+        Clean all AQI feature groups for a fresh start
+        
+        Parameters:
+        confirm (bool): Must be True to actually delete data
+        """
+        if not self.enabled:
+            print("⚠️ Hopsworks not enabled")
+            return False
+        
+        if not confirm:
+            print("⚠️ This will delete ALL AQI feature group data from Hopsworks!")
+            print("   To confirm, call clean_all_feature_groups(confirm=True)")
+            return False
+        
+        try:
+            print("🧹 Cleaning ALL AQI feature groups from Hopsworks...")
+            print("   ⚠️ This will delete all historical data!")
+            
+            # List of all AQI feature group stages
+            stages = ["raw", "engineered", "selected"]
+            deleted_count = 0
+            
+            for stage in stages:
+                fg_name = f"aqi_{stage}_features"
+                try:
+                    # Try multiple versions
+                    for version in range(1, 5):  # Check versions 1-4
+                        try:
+                            fg = self.fs.get_feature_group(name=fg_name, version=version)
+                            if fg is not None:
+                                print(f"🗑️ Deleting feature group: {fg_name} v{version}")
+                                fg.delete()
+                                print(f"✅ Deleted {fg_name} v{version}")
+                                deleted_count += 1
+                        except Exception:
+                            # Version doesn't exist, continue
+                            pass
+                            
+                except Exception as e:
+                    print(f"⚠️ Error checking {fg_name}: {e}")
+            
+            print(f"✅ Feature group cleanup completed - deleted {deleted_count} feature groups")
+            return True
+            
+        except Exception as e:
+            log_error("Feature group cleanup failed", e)
+            return False
 
 def run_hourly_data_pipeline():
     """
-    Hourly pipeline: Fetch incremental data and update feature store
+    Hourly pipeline: Fetch incremental data, handle duplicates, and update feature store
     """
     print("🔄 HOURLY DATA PIPELINE")
     print("="*50)
@@ -949,170 +1211,205 @@ def run_hourly_data_pipeline():
         
         print(f"📈 Fetched {len(new_data)} new records")
         
-        # Save locally (append to existing) - this always works
-        local_path = save_data_locally(new_data, "incremental_data.csv")
-        print(f"💾 Saved incremental data locally: {local_path}")
+        # IMPORTANT: Handle duplicates before saving
+        print("🔍 Checking for duplicates...")
+        existing_data = load_latest_data(fetcher)
         
-        # Save to Hopsworks - optional, pipeline continues if this fails
-        hopsworks_success = False
-        if fetcher.hops_integration and fetcher.hops_integration.enabled:
-            try:
-                success = fetcher.hops_integration.save_to_feature_store(new_data, stage="raw")
-                if success:
-                    print(f"☁️ Appended {len(new_data)} records to Hopsworks feature store")
-                    hopsworks_success = True
-                else:
-                    print("⚠️ Failed to save incremental data to Hopsworks")
-            except Exception as e:
-                print(f"⚠️ Hopsworks save failed: {e}")
-        
-        if hopsworks_success:
-            print("✅ Hourly pipeline completed successfully (Hopsworks + Local)")
+        if existing_data is not None and len(existing_data) > 0:
+            # Merge and remove duplicates based on datetime
+            print("🔧 Merging with existing data and removing duplicates...")
+            combined_data = pd.concat([existing_data, new_data], ignore_index=True)
+            
+            # Remove duplicates based on datetime (keep the last occurrence)
+            before_count = len(combined_data)
+            combined_data = combined_data.drop_duplicates(subset=['datetime'], keep='last')
+            after_count = len(combined_data)
+            
+            # Sort by datetime
+            combined_data = combined_data.sort_values('datetime')
+            
+            print(f"📊 Before deduplication: {before_count} records")
+            print(f"📊 After deduplication: {after_count} records")
+            print(f"📊 Duplicates removed: {before_count - after_count}")
+            
+            # Only save if there are actually new records
+            new_records_count = after_count - len(existing_data)
+            if new_records_count > 0:
+                print(f"✅ Found {new_records_count} genuinely new records")
+                
+                # Save the complete updated dataset (Hopsworks will replace, not append)
+                print("💾 Saving updated dataset...")
+                
+                # Save locally first (always works)
+                local_path = save_with_timestamp(combined_data, "complete_raw_data.csv")
+                print(f"💾 Saved updated data locally: {local_path}")
+                
+                # For Hopsworks, save the complete updated dataset
+                # Note: Hopsworks feature groups with primary keys handle duplicates automatically
+                hopsworks_success = safe_save(fetcher, combined_data, "raw")
+                
+                if hopsworks_success:
+                    print("✅ Updated data saved to Hopsworks (duplicates handled automatically)")
+                
+            else:
+                print("⏰ No new unique records found (all were duplicates)")
         else:
-            print("✅ Hourly pipeline completed successfully (Local only)")
-            print("   Data saved locally, can be used for training")
+            # No existing data, just save the new data
+            print("📊 No existing data to merge with, saving new data directly")
+            
+            # Save locally first (always works)
+            local_path = save_with_timestamp(new_data, "incremental_data.csv")
+            print(f"💾 Saved incremental data locally: {local_path}")
+            
+            # Save to Hopsworks using helper function
+            hopsworks_success = safe_save(fetcher, new_data, "raw")
+        
+        print("✅ Hourly pipeline completed successfully")
+        print("💡 Note: Hopsworks Feature Groups with primary keys automatically handle duplicates")
+        print("          Local files are timestamped to preserve history")
         
         return True
         
     except Exception as e:
-        print(f"❌ Hourly pipeline failed: {e}")
-        import traceback
-        traceback.print_exc()
+        log_error("Hourly pipeline failed", e)
         return False
 
 def run_daily_model_pipeline():
     """
-    Daily pipeline: Load latest data, perform feature engineering, and train models
+    Daily pipeline: Load latest data, perform COMPLETE feature engineering, and train ALL models
+    This mirrors the full pipeline training process exactly
     """
     print("🤖 DAILY MODEL TRAINING PIPELINE")
     print("="*50)
     
     try:
-        # Load latest data from Hopsworks or local files
+        # Load latest data using helper function
         fetcher = OpenMeteoDataFetcher()
-        raw_data = None
-        
-        # Try loading from Hopsworks first
-        if fetcher.hops_integration and fetcher.hops_integration.enabled:
-            print("📥 Loading data from Hopsworks feature store...")
-            raw_data = fetcher.hops_integration.load_from_feature_store(stage="raw")
-        
-        # If Hopsworks fails, try local files as fallback
-        if raw_data is None or len(raw_data) == 0:
-            print("⚠️ No data in Hopsworks, trying local files...")
-            import glob
-            import pandas as pd
-            
-            # Look for local data files
-            csv_files = glob.glob("data/historical_*.csv") + glob.glob("data/complete_dataset_*.csv")
-            if csv_files:
-                latest_file = max(csv_files, key=os.path.getctime)
-                print(f"📁 Loading from local file: {latest_file}")
-                raw_data = pd.read_csv(latest_file)
-                raw_data['datetime'] = pd.to_datetime(raw_data['datetime'])
-                print(f"✅ Loaded {len(raw_data)} records from local file")
-            else:
-                print("❌ No local data files found either")
-                print("   Please run the data fetching pipeline first:")
-                print("   python scripts/fetch_hourly_data.py")
-                return False
+        raw_data = load_latest_data(fetcher)
         
         if raw_data is None or len(raw_data) == 0:
             print("❌ No data available for training")
+            print("   Please run the data fetching pipeline first:")
+            print("   python scripts/fetch_hourly_data.py")
             return False
         
         print(f"📊 Using {len(raw_data)} records for training")
         print(f"📅 Date range: {raw_data['datetime'].min()} to {raw_data['datetime'].max()}")
         
-        # Feature engineering
-        print("🔧 Performing feature engineering...")
+        # STEP 1: COMPREHENSIVE FEATURE ENGINEERING (same as full pipeline)
+        print("\n🔧 STEP 1: COMPREHENSIVE FEATURE ENGINEERING")
+        print("="*50)
         from features.feature_engineering import FeatureEngineer, AdvancedFeatureSelector
         
         engineer = FeatureEngineer()
+        print("🔧 Engineering features...")
         engineered_data = engineer.engineer_features(raw_data)
+        print("🔧 Handling missing values...")
         engineered_data = engineer.handle_missing_values(engineered_data)
         
-        # Save engineered features to Hopsworks (if available)
-        if fetcher.hops_integration and fetcher.hops_integration.enabled:
-            success = fetcher.hops_integration.save_to_feature_store(engineered_data, stage="engineered")
-            if success:
-                print(f"☁️ Saved engineered features to Hopsworks")
-            else:
-                print(f"⚠️ Failed to save engineered features to Hopsworks")
+        print(f"✅ Feature engineering completed!")
+        print(f"📊 Features shape: {engineered_data.shape}")
         
-        # Feature selection
-        print("🎯 Performing feature selection...")
+        # Save engineered features using helper function
+        safe_save(fetcher, engineered_data, "engineered")
+        
+        # STEP 2: ADVANCED FEATURE SELECTION (same as full pipeline)
+        print("\n🎯 STEP 2: ADVANCED FEATURE SELECTION")
+        print("="*50)
         selector = AdvancedFeatureSelector()
-        selected_data, selected_features = selector.select_features(engineered_data, max_features=20)
+        selected_data, selected_features = selector.select_features(engineered_data, max_features=25)
         
-        # Save selected features to Hopsworks (if available)
-        if fetcher.hops_integration and fetcher.hops_integration.enabled:
-            success = fetcher.hops_integration.save_to_feature_store(selected_data, stage="selected")
-            if success:
-                print(f"☁️ Saved selected features to Hopsworks")
-            else:
-                print(f"⚠️ Failed to save selected features to Hopsworks")
+        print(f"✅ Feature selection completed!")
+        print(f"📊 Selected features: {len(selected_features)}")
         
-        print(f"🎯 Selected {len(selected_features)} features for training")
+        # Save selected features using helper function
+        safe_save(fetcher, selected_data, "selected")
         
-        # Train models
-        print("🚀 Training models...")
+        # Save feature names locally as well
+        try:
+            import os
+            os.makedirs("data", exist_ok=True)
+            feature_names_path = os.path.join("data", "selected_feature_names.txt")
+            with open(feature_names_path, 'w') as f:
+                f.write("\n".join(selected_features))
+            print(f"📝 Feature names saved: {feature_names_path}")
+        except Exception as e:
+            print(f"⚠️ Could not save feature names: {e}")
+        
+        # STEP 3A: TRAIN SKLEARN MODELS (enhanced training)
+        print("\n🚀 STEP 3A: TRAINING SKLEARN MODELS")
+        print("="*50)
         from models.train_sklearn import SklearnModelTrainer
         
-        trainer = SklearnModelTrainer()
-        results = trainer.train_all_models(selected_data, test_size=0.2)
+        sklearn_trainer = SklearnModelTrainer()
+        sklearn_results = sklearn_trainer.train_all_models(selected_data, test_size=0.2)
         
-        # Save best model (automatically uploads to Hopsworks if available)
-        model_path = trainer.save_best_model()
+        # Save best sklearn model
+        sklearn_model_path = None
+        if sklearn_results:
+            sklearn_model_path = sklearn_trainer.save_best_model()
+            print(f"💾 Best sklearn model saved: {sklearn_model_path}")
+            print(f"🏆 Best sklearn model: {sklearn_trainer.best_model_name}")
+            if sklearn_trainer.best_model_name in sklearn_trainer.results:
+                best_r2 = sklearn_trainer.results[sklearn_trainer.best_model_name]['test_r2']
+                print(f"📊 Best sklearn R²: {best_r2:.4f}")
         
-        print(f"✅ Daily model pipeline completed successfully")
-        print(f"🏆 Best model: {trainer.best_model_name}")
-        print(f"📁 Model saved: {model_path}")
+        # STEP 3B: TRAIN DEEP LEARNING MODELS (NEW - now included!)
+        print("\n🧠 STEP 3B: TRAINING DEEP LEARNING MODELS")
+        print("="*50)
+        from models.train_dl import DeepLearningModelTrainer
         
+        dl_trainer = DeepLearningModelTrainer()
+        dl_results = dl_trainer.train_all_models(selected_data, test_size=0.2, epochs=100)
+        
+        # Save best deep learning model
+        dl_model_path = None
+        if dl_results:
+            dl_model_path = dl_trainer.save_best_model()
+            print(f"💾 Best deep learning model saved: {dl_model_path}")
+            print(f"🏆 Best deep learning model: {dl_trainer.best_model_name}")
+            if dl_trainer.best_model_name in dl_trainer.results:
+                best_r2 = dl_trainer.results[dl_trainer.best_model_name]['test_r2']
+                print(f"📊 Best deep learning R²: {best_r2:.4f}")
+        
+        # FINAL SUMMARY
+        print("\n🎉 DAILY MODEL PIPELINE COMPLETED!")
+        print("="*50)
+        print(f"📊 Total features engineered: {engineered_data.shape[1]}")
+        print(f"🎯 Selected features: {len(selected_features)}")
+        print(f"📈 Training data shape: {selected_data.shape}")
+        
+        if sklearn_results:
+            print(f"🏆 Best sklearn model: {sklearn_trainer.best_model_name}")
+        if dl_results:
+            print(f"🏆 Best deep learning model: {dl_trainer.best_model_name}")
+        
+        # Upload models to Hopsworks if enabled
+        if fetcher.hops_integration and fetcher.hops_integration.enabled:
+            print("\n☁️ Uploading models to Hopsworks Model Registry...")
+            try:
+                if sklearn_model_path and os.path.exists(sklearn_model_path):
+                    sklearn_success = fetcher.hops_integration.save_model(
+                        sklearn_model_path, "aqi_sklearn_model", "sklearn"
+                    )
+                    if sklearn_success:
+                        print("✅ Sklearn model uploaded to Hopsworks")
+                
+                if dl_model_path and os.path.exists(dl_model_path):
+                    dl_success = fetcher.hops_integration.save_model(
+                        dl_model_path, "aqi_dl_model", "tensorflow"
+                    )
+                    if dl_success:
+                        print("✅ Deep learning model uploaded to Hopsworks")
+                        
+            except Exception as upload_error:
+                print(f"⚠️ Model upload failed: {upload_error}")
+        
+        print("✅ Daily model pipeline completed successfully!")
         return True
         
     except Exception as e:
-        print(f"❌ Daily pipeline failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-        
-        # Save engineered features to Hopsworks
-        success = fetcher.hops_integration.save_to_feature_store(engineered_data, stage="engineered")
-        if success:
-            print(f"☁️ Saved engineered features to Hopsworks")
-        
-        # Feature selection
-        selector = AdvancedFeatureSelector()
-        selected_data, selected_features = selector.select_features(engineered_data, max_features=20)
-        
-        # Save selected features to Hopsworks
-        success = fetcher.hops_integration.save_to_feature_store(selected_data, stage="selected")
-        if success:
-            print(f"☁️ Saved selected features to Hopsworks")
-        
-        print(f"🎯 Selected {len(selected_features)} features for training")
-        
-        # Train models
-        print("🚀 Training models...")
-        from models.train_sklearn import SklearnModelTrainer
-        
-        trainer = SklearnModelTrainer()
-        results = trainer.train_all_models(selected_data, test_size=0.2)
-        
-        # Save best model (automatically uploads to Hopsworks)
-        model_path = trainer.save_best_model()
-        
-        print(f"✅ Daily model pipeline completed successfully")
-        print(f"🏆 Best model: {trainer.best_model_name}")
-        print(f"📁 Model saved: {model_path}")
-        
-        return True
-        
-    except Exception as e:
-        print(f"❌ Daily pipeline failed: {e}")
-        import traceback
-        traceback.print_exc()
+        log_error("Daily pipeline failed", e)
         return False
 
 def main():

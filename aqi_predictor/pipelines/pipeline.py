@@ -14,7 +14,7 @@ import argparse
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pipelines.fetch_data import OpenMeteoDataFetcher, HopsworksIntegration, save_data_locally
+from pipelines.fetch_data import OpenMeteoDataFetcher, HopsworksIntegration, save_with_timestamp
 from features.feature_engineering import FeatureEngineer, AdvancedFeatureSelector
 from models.train_sklearn import SklearnModelTrainer
 from models.train_dl import DeepLearningModelTrainer
@@ -71,7 +71,7 @@ class AQIPipeline:
         # Fallback to local storage
         if filename:
             try:
-                local_path = save_data_locally(df, filename, self.data_dir)
+                local_path = save_with_timestamp(df, filename, self.data_dir)
                 print(f"💾 Data saved locally: {local_path}")
                 return True
             except Exception as e:
