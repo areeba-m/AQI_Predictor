@@ -45,7 +45,7 @@ jobs:
       - name: Run daily model training
         run: |
           cd aqi_predictor
-          python scripts/train_daily_models.py
+          python run_complete_pipeline.py incremental
 
       - name: Upload model artifacts
         if: success()

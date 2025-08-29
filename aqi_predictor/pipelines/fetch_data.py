@@ -34,15 +34,22 @@ def safe_save(fetcher, df: pd.DataFrame, stage: str) -> bool:
         print(f"⚠️ Hopsworks not enabled, skipping {stage} save")
         return False
     
+    print(f"☁️ Attempting to save {len(df)} {stage} records to Hopsworks...")
+    print(f"   Data shape: {df.shape}")
+    print(f"   Date range: {df['datetime'].min() if 'datetime' in df.columns else 'N/A'} to {df['datetime'].max() if 'datetime' in df.columns else 'N/A'}")
+    
     try:
         success = fetcher.hops_integration.save_to_feature_store(df, stage=stage)
         if success:
-            print(f"☁️ Saved {stage} features to Hopsworks: {len(df)} records")
+            print(f"✅ Successfully saved {stage} features to Hopsworks: {len(df)} records")
+            print(f"   💡 Hopsworks feature group should now be updated")
         else:
-            print(f"⚠️ Failed to save {stage} features to Hopsworks")
+            print(f"❌ Failed to save {stage} features to Hopsworks")
+            print(f"   🔍 Check Hopsworks logs for details")
         return success
     except Exception as e:
         log_error(f"Hopsworks {stage} save failed", e)
+        print(f"   💥 Exception details: {str(e)}")
         return False
 
 def load_latest_data(fetcher) -> Optional[pd.DataFrame]:
@@ -359,7 +366,11 @@ class OpenMeteoDataFetcher:
                         print(f"✅ Feature group {fg_name} exists, loading data...")
                         existing_data = self.hops_integration.load_from_feature_store(stage="raw")
                         if existing_data is not None and len(existing_data) > 0:
-                            latest_hops = pd.to_datetime(existing_data['datetime']).max()
+                            # Ensure datetime column is timezone-naive for consistency
+                            existing_data['datetime'] = pd.to_datetime(existing_data['datetime'])
+                            if hasattr(existing_data['datetime'].iloc[0], 'tz') and existing_data['datetime'].iloc[0].tz is not None:
+                                existing_data['datetime'] = existing_data['datetime'].dt.tz_localize(None)
+                            latest_hops = existing_data['datetime'].max()
                             latest_timestamps.append(latest_hops)
                             print(f"📊 Latest in Hopsworks: {latest_hops}")
                         else:
@@ -378,7 +389,10 @@ class OpenMeteoDataFetcher:
                 latest_file = max(csv_files, key=os.path.getctime)
                 print(f"📁 Checking local file: {latest_file}")
                 local_data = pd.read_csv(latest_file)
+                # Ensure datetime is timezone-naive for consistency
                 local_data['datetime'] = pd.to_datetime(local_data['datetime'])
+                if hasattr(local_data['datetime'].iloc[0], 'tz') and local_data['datetime'].iloc[0].tz is not None:
+                    local_data['datetime'] = local_data['datetime'].dt.tz_localize(None)
                 latest_local = local_data['datetime'].max()
                 latest_timestamps.append(latest_local)
                 print(f"📁 Latest in local files: {latest_local}")
@@ -406,13 +420,28 @@ class OpenMeteoDataFetcher:
         """
         try:
             now = datetime.now()
+            
+            # Handle timezone differences between now and since_timestamp
+            if hasattr(since_timestamp, 'tz') and since_timestamp.tz is not None:
+                # since_timestamp is timezone-aware, make it timezone-naive for comparison
+                if hasattr(since_timestamp, 'tz_localize'):
+                    since_timestamp = since_timestamp.tz_localize(None)
+                else:
+                    # Convert pandas timestamp to naive datetime
+                    since_timestamp = since_timestamp.replace(tzinfo=None)
+            
             start_date = since_timestamp + timedelta(hours=1)  # Start from next hour
             
-            # For archive API, use up to 3 days ago to ensure data availability
-            end_date = min(now - timedelta(days=3), start_date + timedelta(days=max_days))
+            # For archive API, we can get data up to about 3 hours ago
+            # Use the earlier of: (3 hours ago) or (requested end date)
+            max_available_date = now - timedelta(hours=3)
+            requested_end_date = start_date + timedelta(days=max_days)
+            end_date = min(max_available_date, requested_end_date)
             
+            # Ensure we don't try to fetch data from the future or too far back
             if start_date >= end_date:
                 print(f"⏰ No new data to fetch (start: {start_date}, end: {end_date})")
+                print(f"   Data is too recent - archive API has ~3 hour delay")
                 return None
             
             return fetch_data_for_period(
@@ -1005,22 +1034,44 @@ class HopsworksIntegration:
         
         try:
             print(f"🤖 Saving model to registry: {model_name}")
+            print(f"📁 Model directory: {model_dir}")
+            
+            # Verify the directory exists and list contents
+            if os.path.isdir(model_dir):
+                files_in_dir = os.listdir(model_dir)
+                print(f"📂 Files in model directory: {files_in_dir}")
+            else:
+                print(f"❌ Model directory does not exist: {model_dir}")
+                return False
             
             # Prepare metrics dictionary with only numeric values
             metrics = {}
-            metadata_file = os.path.join(model_dir, "sklearn_model_metadata.json")
+            
+            # Look for appropriate metadata file based on model type
+            if model_type == "sklearn":
+                metadata_file = os.path.join(model_dir, "sklearn_model_metadata.json")
+            elif model_type in ["tensorflow", "dl", "deep_learning"]:
+                metadata_file = os.path.join(model_dir, "dl_model_metadata.json")
+            else:
+                metadata_file = os.path.join(model_dir, f"{model_type}_model_metadata.json")
+            
             if os.path.exists(metadata_file):
                 import json
                 with open(metadata_file, 'r') as f:
                     model_metadata = json.load(f)
+                    print(f"📊 Loading metrics from: {metadata_file}")
                     # Only add numeric metrics, skip framework string
                     for key, value in model_metadata.items():
                         if isinstance(value, (int, float)) and key in ["test_r2", "test_rmse", "test_mae", "train_r2", "cv_score"]:
                             metrics[key] = float(value)
+                            print(f"   {key}: {value}")
+            else:
+                print(f"⚠️ Metadata file not found: {metadata_file}")
             
             # Add default metrics if none found
             if not metrics:
                 metrics = {"test_rmse": 0.0, "test_r2": 0.0}
+                print("⚠️ Using default metrics")
             
             # Create new model (always create new version to avoid conflicts)
             print(f"🆕 Creating new model: {model_name}")
@@ -1173,6 +1224,8 @@ def run_hourly_data_pipeline():
     """
     Hourly pipeline: Fetch incremental data, handle duplicates, and update feature store
     """
+    import pandas as pd
+    
     print("🔄 HOURLY DATA PIPELINE")
     print("="*50)
     
@@ -1194,22 +1247,49 @@ def run_hourly_data_pipeline():
         
         # Check if we need to fetch incremental data
         now = datetime.now()
+        
+        # Handle timezone differences between now and latest_timestamp
+        if hasattr(latest_timestamp, 'tz') and latest_timestamp.tz is not None:
+            # latest_timestamp is timezone-aware, make now timezone-naive for comparison
+            if hasattr(latest_timestamp, 'tz_localize'):
+                latest_timestamp = latest_timestamp.tz_localize(None)
+            else:
+                # Convert pandas timestamp to naive datetime
+                latest_timestamp = latest_timestamp.replace(tzinfo=None)
+        
         hours_since_last = (now - latest_timestamp).total_seconds() / 3600
         
-        if hours_since_last < 1:
-            print(f"⏰ Data is recent ({hours_since_last:.1f} hours old), no update needed")
+        if hours_since_last < 0.5:  # Changed from 1 hour to 30 minutes
+            print(f"⏰ Data is very recent ({hours_since_last:.1f} hours old), no update needed")
             return True
         
         print(f"📊 Last data: {latest_timestamp} ({hours_since_last:.1f} hours ago)")
+        print(f"💡 Attempting to fetch newer data...")
         
         # Fetch incremental data
         new_data = fetcher.fetch_incremental_data(latest_timestamp)
         
         if new_data is None or len(new_data) == 0:
-            print("📭 No new data available")
-            return True
-        
-        print(f"📈 Fetched {len(new_data)} new records")
+            # Try a different approach - fetch the latest available data directly
+            print("📭 No incremental data available, trying to fetch latest available data...")
+            latest_data = fetcher.fetch_latest_data(hours_back=24)  # Last 24 hours
+            
+            if latest_data is not None and len(latest_data) > 0:
+                # Filter to get only data newer than our latest timestamp
+                latest_data['datetime'] = pd.to_datetime(latest_data['datetime'])
+                newer_data = latest_data[latest_data['datetime'] > latest_timestamp]
+                
+                if len(newer_data) > 0:
+                    print(f"📈 Found {len(newer_data)} newer records via latest data fetch")
+                    new_data = newer_data
+                else:
+                    print("📭 No newer data found in latest fetch")
+                    return True
+            else:
+                print("📭 No data available from latest fetch either")
+                return True
+        else:
+            print(f"📈 Fetched {len(new_data)} incremental records")
         
         # IMPORTANT: Handle duplicates before saving
         print("🔍 Checking for duplicates...")
@@ -1218,24 +1298,140 @@ def run_hourly_data_pipeline():
         if existing_data is not None and len(existing_data) > 0:
             # Merge and remove duplicates based on datetime
             print("🔧 Merging with existing data and removing duplicates...")
-            combined_data = pd.concat([existing_data, new_data], ignore_index=True)
             
-            # Remove duplicates based on datetime (keep the last occurrence)
-            before_count = len(combined_data)
-            combined_data = combined_data.drop_duplicates(subset=['datetime'], keep='last')
-            after_count = len(combined_data)
+            # Debug: Check column structure before merging
+            print(f"🔍 Existing data columns: {len(existing_data.columns)} columns")
+            print(f"🔍 New data columns: {len(new_data.columns)} columns")
             
-            # Sort by datetime
-            combined_data = combined_data.sort_values('datetime')
+            # Ensure both datasets have the same column structure (raw data format)
+            # Get the expected raw data columns from the new_data (which is fresh from OpenMeteo)
+            expected_columns = set(new_data.columns)
+            existing_columns = set(existing_data.columns)
+            
+            # Check for column mismatch
+            if expected_columns != existing_columns:
+                print("⚠️ Column mismatch detected between existing and new data")
+                print(f"   Expected (new): {sorted(expected_columns)}")
+                print(f"   Existing: {sorted(existing_columns)}")
+                
+                # If existing data has many more columns, it might be processed data
+                if len(existing_columns) > len(expected_columns) * 2:
+                    print("🔧 Existing data appears to be processed/engineered data")
+                    print("   Loading only raw data for comparison...")
+                    
+                    # Try to get only raw data from Hopsworks
+                    raw_only_data = None
+                    if fetcher.hops_integration and fetcher.hops_integration.enabled:
+                        try:
+                            raw_only_data = fetcher.hops_integration.load_from_feature_store(stage="raw")
+                            if raw_only_data is not None:
+                                # Keep only columns that match new_data structure
+                                common_columns = list(expected_columns.intersection(set(raw_only_data.columns)))
+                                if 'datetime' in common_columns and len(common_columns) > 5:  # Ensure we have basic columns
+                                    existing_data = raw_only_data[common_columns]
+                                    print(f"✅ Using raw data with {len(common_columns)} matching columns")
+                                else:
+                                    print("⚠️ Insufficient matching columns, using new data only")
+                                    existing_data = None
+                        except Exception as e:
+                            print(f"⚠️ Could not load raw-only data: {e}")
+                            existing_data = None
+                
+                # If we still have column mismatch, align the columns
+                if existing_data is not None:
+                    # Keep only common columns
+                    common_columns = list(expected_columns.intersection(set(existing_data.columns)))
+                    if 'datetime' in common_columns and len(common_columns) > 5:
+                        existing_data = existing_data[common_columns]
+                        new_data = new_data[common_columns]
+                        print(f"✅ Aligned data to {len(common_columns)} common columns")
+                    else:
+                        print("❌ Too few common columns, skipping merge")
+                        existing_data = None
+            
+            if existing_data is not None:
+                # Ensure both datasets have consistent timezone handling
+                
+                # Normalize timezone for existing_data
+                if 'datetime' in existing_data.columns:
+                    existing_data['datetime'] = pd.to_datetime(existing_data['datetime'])
+                    if len(existing_data) > 0 and hasattr(existing_data['datetime'].iloc[0], 'tz') and existing_data['datetime'].iloc[0].tz is not None:
+                        existing_data['datetime'] = existing_data['datetime'].dt.tz_localize(None)
+                
+                # Normalize timezone for new_data
+                if 'datetime' in new_data.columns:
+                    new_data['datetime'] = pd.to_datetime(new_data['datetime'])
+                    if len(new_data) > 0 and hasattr(new_data['datetime'].iloc[0], 'tz') and new_data['datetime'].iloc[0].tz is not None:
+                        new_data['datetime'] = new_data['datetime'].dt.tz_localize(None)
+                
+                # Extra safety: ensure column order and data types match
+                common_columns = [col for col in new_data.columns if col in existing_data.columns]
+                existing_data = existing_data[common_columns].copy()
+                new_data = new_data[common_columns].copy()
+                
+                # Align data types
+                for col in common_columns:
+                    if col != 'datetime':
+                        try:
+                            # Convert both to same dtype (prefer float64 for numeric)
+                            if existing_data[col].dtype != new_data[col].dtype:
+                                target_dtype = 'float64' if pd.api.types.is_numeric_dtype(existing_data[col]) or pd.api.types.is_numeric_dtype(new_data[col]) else 'object'
+                                existing_data[col] = existing_data[col].astype(target_dtype)
+                                new_data[col] = new_data[col].astype(target_dtype)
+                        except Exception as dtype_error:
+                            print(f"⚠️ Could not align dtype for column {col}: {dtype_error}")
+                
+                print(f"✅ Data alignment complete - both datasets have {len(common_columns)} columns")
+                
+                # Convert to dict and back to DataFrame to ensure clean structure
+                # This fixes internal array dimension mismatches
+                print("🔧 Rebuilding DataFrames for compatibility...")
+                existing_dict = existing_data.to_dict('records')
+                new_dict = new_data.to_dict('records')
+                
+                # Create fresh DataFrames
+                existing_clean = pd.DataFrame(existing_dict)
+                new_clean = pd.DataFrame(new_dict)
+                
+                # Ensure column order is consistent
+                column_order = sorted(common_columns)
+                existing_clean = existing_clean[column_order]
+                new_clean = new_clean[column_order]
+                
+                # Now try the concat
+                combined_data = pd.concat([existing_clean, new_clean], ignore_index=True)
+                
+                # Remove duplicates based on datetime (keep the last occurrence)
+                before_count = len(combined_data)
+                combined_data = combined_data.drop_duplicates(subset=['datetime'], keep='last')
+                after_count = len(combined_data)
+                
+                # Sort by datetime (now both are timezone-naive)
+                combined_data = combined_data.sort_values('datetime')
+            else:
+                # No existing data to merge with, just use new data
+                print("🔧 Using new data only (no existing data to merge)")
+                combined_data = new_data
+                before_count = len(combined_data)
+                after_count = len(combined_data)
             
             print(f"📊 Before deduplication: {before_count} records")
             print(f"📊 After deduplication: {after_count} records")
             print(f"📊 Duplicates removed: {before_count - after_count}")
             
             # Only save if there are actually new records
-            new_records_count = after_count - len(existing_data)
-            if new_records_count > 0:
-                print(f"✅ Found {new_records_count} genuinely new records")
+            # Calculate new records based on what we added vs deduplicated result
+            original_existing_count = len(existing_data) if existing_data is not None else 0
+            new_data_count = len(new_data) if new_data is not None else 0
+            
+            print(f"🔢 Original existing data: {original_existing_count} records")
+            print(f"🔢 New data fetched: {new_data_count} records") 
+            print(f"🔢 Combined after deduplication: {after_count} records")
+            
+            # If we have new data and the combined dataset is larger than just existing data
+            if new_data_count > 0 and after_count > original_existing_count:
+                net_new_records = after_count - original_existing_count
+                print(f"✅ Found {net_new_records} net new records to save")
                 
                 # Save the complete updated dataset (Hopsworks will replace, not append)
                 print("💾 Saving updated dataset...")
@@ -1250,9 +1446,18 @@ def run_hourly_data_pipeline():
                 
                 if hopsworks_success:
                     print("✅ Updated data saved to Hopsworks (duplicates handled automatically)")
+                    
+            elif new_data_count > 0:
+                print("⚠️ New data was fetched but appears to be duplicates")
+                print("💾 Saving anyway to ensure data consistency...")
+                
+                # Save locally and to Hopsworks anyway
+                local_path = save_with_timestamp(combined_data, "complete_raw_data.csv")
+                hopsworks_success = safe_save(fetcher, combined_data, "raw")
                 
             else:
-                print("⏰ No new unique records found (all were duplicates)")
+                print("ℹ️ No new data to save")
+                return True
         else:
             # No existing data, just save the new data
             print("📊 No existing data to merge with, saving new data directly")
@@ -1384,26 +1589,41 @@ def run_daily_model_pipeline():
         if dl_results:
             print(f"🏆 Best deep learning model: {dl_trainer.best_model_name}")
         
-        # Upload models to Hopsworks if enabled
+        # Upload models to Hopsworks if enabled (after BOTH models are trained)
         if fetcher.hops_integration and fetcher.hops_integration.enabled:
             print("\n☁️ Uploading models to Hopsworks Model Registry...")
             try:
-                if sklearn_model_path and os.path.exists(sklearn_model_path):
+                # Use the models directory with absolute path (both sklearn and dl models are saved there)
+                models_dir = os.path.abspath("models")
+                
+                # Upload sklearn model if trained successfully
+                if sklearn_results and sklearn_model_path and os.path.exists(sklearn_model_path):
+                    print(f"📤 Uploading sklearn model from: {models_dir}")
                     sklearn_success = fetcher.hops_integration.save_model(
-                        sklearn_model_path, "aqi_sklearn_model", "sklearn"
+                        models_dir, "aqi_sklearn_model", "sklearn"
                     )
                     if sklearn_success:
                         print("✅ Sklearn model uploaded to Hopsworks")
+                    else:
+                        print("❌ Sklearn model upload failed")
                 
-                if dl_model_path and os.path.exists(dl_model_path):
+                # Upload deep learning model if trained successfully
+                if dl_results and dl_model_path and os.path.exists(dl_model_path):
+                    print(f"📤 Uploading deep learning model from: {models_dir}")
                     dl_success = fetcher.hops_integration.save_model(
-                        dl_model_path, "aqi_dl_model", "tensorflow"
+                        models_dir, "aqi_dl_model", "tensorflow"
                     )
                     if dl_success:
                         print("✅ Deep learning model uploaded to Hopsworks")
+                    else:
+                        print("❌ Deep learning model upload failed")
+                else:
+                    print("[] Couldnt upload deep learning model to hopswork")
                         
             except Exception as upload_error:
                 print(f"⚠️ Model upload failed: {upload_error}")
+        else:
+            print("[] Fetcher hopsworks integration error\n")
         
         print("✅ Daily model pipeline completed successfully!")
         return True

@@ -348,15 +348,15 @@ class AQIPredictor:
                 'timestamp': datetime.now().isoformat()
             }
     
-    def predict_forecast(self, features_df: pd.DataFrame, hours_ahead: int = 72) -> Dict[str, Any]:
+    def predict_forecast(self, features_df: pd.DataFrame, hours_ahead: int = 72, model_type: str = 'best') -> Dict[str, Any]:
         """Predict AQI forecast for the next N hours"""
-        print(f"🔮 Generating {hours_ahead} hour AQI forecast...")
+        print(f"🔮 Generating {hours_ahead} hour AQI forecast using {model_type} model...")
         
         # For simplicity, we'll assume the features represent current conditions
         # In a real implementation, you'd need future weather forecasts
         
         # Make base prediction
-        base_prediction = self.predict_aqi(features_df, model_type='best')
+        base_prediction = self.predict_aqi(features_df, model_type=model_type)
         
         if 'error' in base_prediction:
             return base_prediction

@@ -90,9 +90,57 @@ def load_predictor():
         else:
             return None, f"Error loading models: {error_msg}"
 
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def load_selected_features():
+    """Load the selected features list"""
+    try:
+        with open('data/selected_feature_names.txt', 'r') as f:
+            selected_features = [line.strip() for line in f.readlines() if line.strip()]
+        return selected_features
+    except Exception as e:
+        st.warning(f"Could not load selected features: {e}")
+        return None
+
 @st.cache_data(ttl=1800)  # Cache for 30 minutes
-def fetch_latest_data():
-    """Fetch and process latest data with caching"""
+def fetch_latest_processed_data():
+    """Fetch latest processed data from Hopsworks feature store"""
+    try:
+        from pipelines.fetch_data import HopsworksIntegration
+        
+        # Use Hopsworks integration to get processed data
+        hops = HopsworksIntegration()
+        
+        if not hops.enabled:
+            return None, None, "Hopsworks not available - using fallback data fetch"
+        
+        # IMPORTANT: Get selected features data (optimized for predictions), not raw engineered features
+        selected_data = hops.load_from_feature_store(stage="selected")
+        
+        if selected_data is None or len(selected_data) == 0:
+            # Fallback to engineered features if selected not available
+            st.warning("Selected features not found, using engineered features")
+            selected_data = hops.load_from_feature_store(stage="engineered")
+            
+            if selected_data is None or len(selected_data) == 0:
+                return None, None, "No processed data available in feature store"
+        
+        # Sort by datetime and get latest records
+        if 'datetime' in selected_data.columns:
+            selected_data = selected_data.sort_values('datetime').tail(48)  # Last 48 hours
+        
+        # Also get raw data for weather correlations (if needed for UI)
+        raw_data = hops.load_from_feature_store(stage="raw")
+        if raw_data is not None and 'datetime' in raw_data.columns:
+            raw_data = raw_data.sort_values('datetime').tail(48)
+        
+        return raw_data, selected_data, None
+        
+    except Exception as e:
+        # Fallback to old method if Hopsworks fails
+        return fetch_latest_data_fallback()
+
+def fetch_latest_data_fallback():
+    """Fallback method - fetch and process latest data (original method)"""
     try:
         # Initialize components
         fetcher = OpenMeteoDataFetcher()
@@ -108,7 +156,21 @@ def fetch_latest_data():
         engineered_data = engineer.engineer_features(latest_data)
         engineered_data = engineer.handle_missing_values(engineered_data)
         
-        return latest_data, engineered_data, None
+        # Apply feature selection to match trained models
+        selected_features = load_selected_features()
+        if selected_features:
+            # Keep datetime and target columns, plus selected features
+            available_features = [f for f in selected_features if f in engineered_data.columns]
+            keep_columns = ['datetime'] + available_features
+            if 'us_aqi' in engineered_data.columns:
+                keep_columns.append('us_aqi')
+            
+            selected_data = engineered_data[keep_columns].copy()
+            st.info(f"Using {len(available_features)}/{len(selected_features)} selected features")
+        else:
+            selected_data = engineered_data
+            
+        return latest_data, selected_data, "Fallback data processing used"
         
     except Exception as e:
         return None, None, f"Error fetching data: {str(e)}"
@@ -297,6 +359,49 @@ def main():
         st.info("💡 To train models, run: `python pipelines/pipeline.py --mode train`")
         return
     
+    # Model Selection
+    st.sidebar.subheader("🤖 Model Selection")
+    
+    # Get available models info
+    sklearn_available = predictor.model_manager.sklearn_model is not None
+    dl_available = predictor.model_manager.dl_model is not None
+    
+    model_options = []
+    model_labels = []
+    
+    if sklearn_available and dl_available:
+        model_options = ['best', 'sklearn', 'deep_learning', 'ensemble']
+        model_labels = [
+            "🏆 Best Model (Auto-select)",
+            f"🌳 Random Forest (R²: {predictor.model_manager.sklearn_metadata.get('test_r2', 0):.4f})",
+            f"🧠 Deep Learning (R²: {predictor.model_manager.dl_metadata.get('test_r2', 0):.4f})",
+            "🤝 Ensemble (Both models)"
+        ]
+    elif sklearn_available:
+        model_options = ['sklearn']
+        model_labels = [f"🌳 Random Forest (R²: {predictor.model_manager.sklearn_metadata.get('test_r2', 0):.4f})"]
+    elif dl_available:
+        model_options = ['deep_learning']
+        model_labels = [f"🧠 Deep Learning (R²: {predictor.model_manager.dl_metadata.get('test_r2', 0):.4f})"]
+    else:
+        st.sidebar.error("No models available")
+        return
+    
+    selected_model = st.sidebar.selectbox(
+        "Choose prediction model:",
+        options=model_options,
+        format_func=lambda x: model_labels[model_options.index(x)],
+        index=0
+    )
+    
+    # Display model info
+    if selected_model == 'sklearn' or (selected_model == 'best' and sklearn_available):
+        st.sidebar.info(f"📊 Sklearn Model: {predictor.model_manager.sklearn_metadata.get('model_name', 'Random Forest')}")
+    elif selected_model == 'deep_learning' or (selected_model == 'best' and not sklearn_available):
+        st.sidebar.info(f"🧠 DL Model: {predictor.model_manager.dl_metadata.get('model_name', 'Deep Feedforward')}")
+    elif selected_model == 'ensemble':
+        st.sidebar.info("🤝 Using both models in ensemble")
+    
     # Sidebar options
     show_forecast = st.sidebar.checkbox("📈 Show 72-hour Forecast", value=True)
     show_correlations = st.sidebar.checkbox("📊 Show Weather Correlations", value=True)
@@ -311,19 +416,22 @@ def main():
         st.experimental_rerun()
     
     # Fetch latest data
-    with st.spinner("📡 Fetching latest data..."):
-        raw_data, engineered_data, fetch_error = fetch_latest_data()
+    with st.spinner("📡 Fetching latest processed data from Hopsworks..."):
+        raw_data, selected_data, fetch_error = fetch_latest_processed_data()
     
     if fetch_error:
-        st.error(f"❌ {fetch_error}")
-        return
+        if "Hopsworks not available" in str(fetch_error):
+            st.warning("⚠️ Using fallback data fetching (slower)")
+        else:
+            st.error(f"❌ {fetch_error}")
+            return
     
     # Current AQI prediction
     st.header("🔮 Current AQI Prediction")
     
     try:
         with st.spinner("🧠 Making prediction..."):
-            current_prediction = predictor.predict_aqi(engineered_data.tail(1))
+            current_prediction = predictor.predict_aqi(selected_data.tail(1), model_type=selected_model)
         
         if 'error' in current_prediction:
             st.error(f"❌ Prediction error: {current_prediction['error']}")
@@ -356,6 +464,11 @@ def main():
                 delta=raw_data['datetime'].iloc[-1].strftime('%Y-%m-%d')
             )
             
+            # Display model used
+            model_used = current_prediction.get('model_type', selected_model)
+            model_icon = "🏆" if model_used == 'best' else "🌳" if model_used == 'sklearn' else "🧠" if model_used == 'deep_learning' else "🤝"
+            st.markdown(f"**Model:** {model_icon} {model_used.replace('_', ' ').title()}")
+            
             # Health advisory
             if current_prediction['is_hazardous']:
                 st.markdown('<div class="alert-box alert-danger">🚨 <strong>Health Alert:</strong> Hazardous air quality! Avoid outdoor activities.</div>', 
@@ -377,7 +490,7 @@ def main():
         
         try:
             with st.spinner("🔮 Generating forecast..."):
-                forecast = predictor.predict_forecast(engineered_data.tail(1), hours_ahead=72)
+                forecast = predictor.predict_forecast(selected_data.tail(1), hours_ahead=72, model_type=selected_model)
             
             if 'error' not in forecast:
                 # Forecast metrics

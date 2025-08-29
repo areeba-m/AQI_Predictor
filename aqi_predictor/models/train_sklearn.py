@@ -10,9 +10,8 @@ import os
 from datetime import datetime
 from typing import Dict, Any, Tuple, Optional
 
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge, Lasso, ElasticNet
-from sklearn.svm import SVR
 from sklearn.model_selection import train_test_split, TimeSeriesSplit, GridSearchCV, cross_val_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
@@ -172,14 +171,6 @@ class SklearnModelTrainer:
                 random_state=self.random_state,
                 n_jobs=-1
             ),
-            'Gradient Boosting': GradientBoostingRegressor(
-                n_estimators=200,
-                max_depth=8,
-                min_samples_split=10,
-                min_samples_leaf=5,
-                learning_rate=0.1,
-                random_state=self.random_state
-            ),
             'Ridge Regression': Ridge(
                 alpha=1.0,
                 random_state=self.random_state
@@ -192,12 +183,6 @@ class SklearnModelTrainer:
                 alpha=0.1,
                 l1_ratio=0.5,
                 random_state=self.random_state
-            ),
-            'SVR': SVR(
-                kernel='rbf',
-                C=100,
-                gamma='scale',
-                epsilon=0.1
             )
         }
         
@@ -231,7 +216,7 @@ class SklearnModelTrainer:
             
             try:
                 # Use scaled features for linear models
-                if name in ['Ridge Regression', 'Lasso Regression', 'ElasticNet', 'SVR']:
+                if name in ['Ridge Regression', 'Lasso Regression', 'ElasticNet']:
                     result = self.evaluate_model(model, name, X_train_scaled, X_test_scaled, y_train, y_test)
                 else:
                     result = self.evaluate_model(model, name, X_train, X_test, y_train, y_test)
