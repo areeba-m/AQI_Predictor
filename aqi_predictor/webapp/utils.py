@@ -1,6 +1,6 @@
 """
 Utility functions for the Streamlit web application
-Includes SHAP explanations, alerts, and dashboard helpers
+Includes alerts and dashboard helpers
 """
 
 import pandas as pd
@@ -11,13 +11,6 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import logging
 from typing import Dict, Any, List, Optional, Tuple
-
-try:
-    import shap
-    SHAP_AVAILABLE = True
-except ImportError:
-    SHAP_AVAILABLE = False
-    st.warning("SHAP not available. Install with: pip install shap")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -172,146 +165,6 @@ class AQIAlertSystem:
         
         st.markdown(alert_html, unsafe_allow_html=True)
 
-class SHAPExplainer:
-    """SHAP model explanation functionality"""
-    
-    def __init__(self, model, feature_names: List[str], model_type: str = 'sklearn'):
-        self.model = model
-        self.feature_names = feature_names
-        self.model_type = model_type
-        self.explainer = None
-        
-        if not SHAP_AVAILABLE:
-            st.warning("⚠️ SHAP explanations not available. Install SHAP to enable feature importance explanations.")
-            return
-        
-        self._initialize_explainer()
-    
-    def _initialize_explainer(self):
-        """Initialize SHAP explainer based on model type"""
-        if not SHAP_AVAILABLE:
-            return
-        
-        try:
-            if self.model_type == 'sklearn':
-                if hasattr(self.model, 'feature_importances_'):
-                    # Tree-based models
-                    self.explainer = shap.TreeExplainer(self.model)
-                else:
-                    # Linear models
-                    # For linear models, we need background data
-                    # This is a simplified approach
-                    self.explainer = shap.LinearExplainer(self.model, np.zeros((1, len(self.feature_names))))
-            
-            elif self.model_type == 'deep_learning':
-                # For neural networks, use deep explainer
-                # This would need background data in practice
-                background = np.zeros((100, len(self.feature_names)))
-                self.explainer = shap.DeepExplainer(self.model, background)
-            
-            logger.info(f"SHAP explainer initialized for {self.model_type} model")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize SHAP explainer: {e}")
-            st.warning(f"⚠️ Could not initialize SHAP explainer: {e}")
-    
-    def explain_prediction(self, features: np.ndarray, top_k: int = 10) -> Optional[Dict[str, Any]]:
-        """Generate SHAP explanation for a prediction"""
-        if not SHAP_AVAILABLE or self.explainer is None:
-            return None
-        
-        try:
-            # Calculate SHAP values
-            shap_values = self.explainer.shap_values(features)
-            
-            # For regression models, shap_values might be 2D or 3D
-            if len(shap_values.shape) > 2:
-                shap_values = shap_values[:, :, 0]  # Take first output for regression
-            
-            # Get the explanation for the first (or only) sample
-            if len(shap_values.shape) == 2:
-                explanation = shap_values[0]
-            else:
-                explanation = shap_values
-            
-            # Create feature importance summary
-            feature_importance = list(zip(self.feature_names, explanation))
-            feature_importance = sorted(feature_importance, key=lambda x: abs(x[1]), reverse=True)
-            
-            # Top positive and negative contributors
-            positive_contributors = [(name, val) for name, val in feature_importance if val > 0][:top_k]
-            negative_contributors = [(name, val) for name, val in feature_importance if val < 0][:top_k]
-            
-            result = {
-                'shap_values': explanation,
-                'feature_names': self.feature_names,
-                'feature_importance': feature_importance[:top_k],
-                'positive_contributors': positive_contributors,
-                'negative_contributors': negative_contributors,
-                'base_value': self.explainer.expected_value if hasattr(self.explainer, 'expected_value') else 0
-            }
-            
-            logger.info("SHAP explanation generated successfully")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error generating SHAP explanation: {e}")
-            st.error(f"❌ Error generating explanation: {e}")
-            return None
-    
-    def display_explanation(self, explanation: Dict[str, Any], prediction_value: float) -> None:
-        """Display SHAP explanation in Streamlit"""
-        if explanation is None:
-            st.info("💡 SHAP explanations are not available for this model type.")
-            return
-        
-        st.subheader("🔍 Prediction Explanation (SHAP)")
-        
-        # Feature importance chart
-        feature_names = [item[0] for item in explanation['feature_importance']]
-        shap_values = [item[1] for item in explanation['feature_importance']]
-        
-        # Create horizontal bar chart
-        fig = go.Figure()
-        
-        colors = ['red' if val < 0 else 'green' for val in shap_values]
-        
-        fig.add_trace(go.Bar(
-            y=feature_names,
-            x=shap_values,
-            orientation='h',
-            marker_color=colors,
-            name='SHAP Values'
-        ))
-        
-        fig.update_layout(
-            title=f"Feature Contributions to Prediction (AQI: {prediction_value:.1f})",
-            xaxis_title="SHAP Value (Impact on Prediction)",
-            yaxis_title="Features",
-            height=600,
-            yaxis={'categoryorder': 'total ascending'}
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Explanation summary
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("**🔺 Top Factors Increasing AQI:**")
-            if explanation['positive_contributors']:
-                for name, value in explanation['positive_contributors'][:5]:
-                    st.write(f"• {name}: +{value:.3f}")
-            else:
-                st.write("No significant positive contributors")
-        
-        with col2:
-            st.markdown("**🔻 Top Factors Decreasing AQI:**")
-            if explanation['negative_contributors']:
-                for name, value in explanation['negative_contributors'][:5]:
-                    st.write(f"• {name}: {value:.3f}")
-            else:
-                st.write("No significant negative contributors")
 
 class DashboardUtils:
     """Utility functions for dashboard creation and data visualization"""

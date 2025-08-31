@@ -212,6 +212,18 @@ class AQIPipeline:
             if results:
                 model_path = self.sklearn_trainer.save_best_model(self.models_dir)
                 print(f"💾 Best sklearn model saved: {model_path}")
+                
+                # Save to Hopsworks model registry
+                if self.hopsworks.enabled:
+                    hopsworks_success = self.hopsworks.save_model(
+                        model_dir=self.models_dir,
+                        model_name="sklearn_aqi_model",
+                        model_type="sklearn"
+                    )
+                    if hopsworks_success:
+                        print("✅ Sklearn model uploaded to Hopsworks")
+                    else:
+                        print("⚠️ Failed to upload sklearn model to Hopsworks")
             
             print(f"✅ Scikit-learn training completed!")
             print(f"🏆 Best model: {self.sklearn_trainer.best_model_name}")
@@ -238,6 +250,18 @@ class AQIPipeline:
             if results:
                 model_path = self.dl_trainer.save_best_model(self.models_dir)
                 print(f"💾 Best deep learning model saved: {model_path}")
+                
+                # Save to Hopsworks model registry
+                if self.hopsworks.enabled:
+                    hopsworks_success = self.hopsworks.save_model(
+                        model_dir=self.models_dir,
+                        model_name="dl_aqi_model",
+                        model_type="tensorflow"
+                    )
+                    if hopsworks_success:
+                        print("✅ Deep learning model uploaded to Hopsworks")
+                    else:
+                        print("⚠️ Failed to upload deep learning model to Hopsworks")
             
             print(f"✅ Deep learning training completed!")
             print(f"🏆 Best model: {self.dl_trainer.best_model_name}")

@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Dict, Any, Tuple, Optional
 
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import Ridge, Lasso, ElasticNet
+from sklearn.linear_model import Ridge, Lasso
 from sklearn.model_selection import train_test_split, TimeSeriesSplit, GridSearchCV, cross_val_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
@@ -178,11 +178,6 @@ class SklearnModelTrainer:
             'Lasso Regression': Lasso(
                 alpha=0.1,
                 random_state=self.random_state
-            ),
-            'ElasticNet': ElasticNet(
-                alpha=0.1,
-                l1_ratio=0.5,
-                random_state=self.random_state
             )
         }
         
@@ -216,7 +211,7 @@ class SklearnModelTrainer:
             
             try:
                 # Use scaled features for linear models
-                if name in ['Ridge Regression', 'Lasso Regression', 'ElasticNet']:
+                if name in ['Ridge Regression', 'Lasso Regression']:
                     result = self.evaluate_model(model, name, X_train_scaled, X_test_scaled, y_train, y_test)
                 else:
                     result = self.evaluate_model(model, name, X_train, X_test, y_train, y_test)
@@ -366,90 +361,9 @@ class SklearnModelTrainer:
         print(f"   📁 Scaler: {scaler_path}")
         print(f"   📁 Metadata: {metadata_path}")
         
-        # Upload to Hopsworks Model Registry
-        self._upload_to_hopsworks(model_path, scaler_path, metadata)
-        
         print(f"Best model saved: {self.best_model_name}")
         
         return model_path
-    
-    def _upload_to_hopsworks(self, model_path: str, scaler_path: str, metadata: dict):
-        """Upload model to Hopsworks Model Registry"""
-        try:
-            # Import Hopsworks integration
-            import sys
-            import os
-            # Add the pipelines directory to path
-            pipelines_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'pipelines')
-            sys.path.append(pipelines_dir)
-            from pipelines.fetch_data import HopsworksIntegration
-            
-            # Initialize Hopsworks
-            hops = HopsworksIntegration()
-            if not hops.enabled:
-                print("⚠️ Hopsworks not enabled, skipping model registry upload")
-                return
-            
-            print("🚀 Uploading model to Hopsworks Model Registry...")
-            
-            # Create model directory for upload
-            import tempfile
-            import shutil
-            
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Copy model files to temp directory
-                model_dir = os.path.join(temp_dir, "sklearn_model")
-                os.makedirs(model_dir, exist_ok=True)
-                
-                # Copy files
-                shutil.copy2(model_path, model_dir)
-                shutil.copy2(scaler_path, model_dir)
-                
-                # Create model.py file for deployment
-                model_py_content = f'''
-import joblib
-import pandas as pd
-import numpy as np
-from datetime import datetime
-
-class SklearnAQIModel:
-    def __init__(self):
-        self.model = None
-        self.scaler = None
-        self.feature_columns = {metadata['feature_columns']}
-        self.model_name = "{metadata['model_name']}"
-    
-    def load(self, model_dir):
-        """Load model and scaler"""
-        import os
-        self.model = joblib.load(os.path.join(model_dir, "{os.path.basename(model_path)}"))
-        self.scaler = joblib.load(os.path.join(model_dir, "{os.path.basename(scaler_path)}"))
-        
-    def predict(self, X):
-        """Make predictions"""
-        if self.model is None or self.scaler is None:
-            raise ValueError("Model not loaded")
-        
-        # Ensure feature order
-        X_scaled = self.scaler.transform(X[self.feature_columns])
-        return self.model.predict(X_scaled)
-'''
-                
-                model_py_path = os.path.join(model_dir, "model.py")
-                with open(model_py_path, 'w') as f:
-                    f.write(model_py_content)
-                
-                # Upload to Hopsworks
-                success = hops.save_model(model_dir, f"aqi_sklearn_{self.best_model_name.lower().replace(' ', '_')}", "sklearn")
-                
-                if success:
-                    print("✅ Model uploaded to Hopsworks Model Registry")
-                else:
-                    print("⚠️ Model upload to Hopsworks failed")
-                    
-        except Exception as e:
-            print(f"⚠️ Hopsworks model upload failed: {e}")
-            print("   Model saved locally only")
 
 def main():
     """Test the sklearn model training pipeline"""

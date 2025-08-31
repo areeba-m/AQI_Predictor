@@ -973,29 +973,46 @@ class HopsworksIntegration:
                 print(f"⚠️ Failed to get feature group {fg_name}: {fg_error}")
                 return None
             
-            # Try multiple read methods with robust error handling
+            # Try simplified read methods to avoid certificate/query service issues
             df = None
-            read_methods = [
-                # Method 1: Direct read (fastest)
-                lambda: fg.read(),
-                # Method 2: Select all then read
-                lambda: fg.select_all().read(),
-                # Method 3: Read with limit (if data is too large)
-                lambda: fg.select_all().limit(50000).read(),
-                # Method 4: Read without query service (offline only)
-                lambda: fg.read(online=False) if hasattr(fg, 'read') else None
-            ]
             
-            for i, method in enumerate(read_methods, 1):
+            # Method 1: Simple read without complex options
+            try:
+                print(f"🔄 Trying simple read...")
+                df = fg.read()
+                if df is not None and len(df) > 0:
+                    print(f"✅ Simple read successful")
+                else:
+                    raise Exception("Read returned empty data")
+            except Exception as read_error:
+                print(f"⚠️ Simple read failed: {read_error}")
+                
+                # Method 2: Try select_all approach
                 try:
-                    print(f"🔄 Trying read method {i}...")
-                    df = method()
+                    print(f"🔄 Trying select_all read...")
+                    df = fg.select_all().read()
                     if df is not None and len(df) > 0:
-                        print(f"✅ Read successful with method {i}")
-                        break
-                except Exception as read_error:
-                    print(f"⚠️ Read method {i} failed: {read_error}")
-                    continue
+                        print(f"✅ Select_all read successful")
+                    else:
+                        raise Exception("Select_all read returned empty data")
+                except Exception as select_error:
+                    print(f"⚠️ Select_all read failed: {select_error}")
+                    
+                    # Method 3: Try offline read to avoid query service issues
+                    try:
+                        print(f"🔄 Trying offline read...")
+                        if hasattr(fg, 'read'):
+                            df = fg.read(online=False)
+                        else:
+                            df = fg.select_all().read(online=False)
+                        
+                        if df is not None and len(df) > 0:
+                            print(f"✅ Offline read successful")
+                        else:
+                            raise Exception("Offline read returned empty data")
+                    except Exception as offline_error:
+                        print(f"⚠️ Offline read failed: {offline_error}")
+                        df = None
             
             if df is None or len(df) == 0:
                 print(f"❌ All read methods failed or returned empty data")
@@ -1488,9 +1505,27 @@ def run_daily_model_pipeline():
     print("="*50)
     
     try:
-        # Load latest data using helper function
+        # Load existing data from Hopsworks (incremental approach)
         fetcher = OpenMeteoDataFetcher()
-        raw_data = load_latest_data(fetcher)
+        
+        print("� Loading existing data from Hopsworks feature store...")
+        raw_data = fetcher.hops_integration.load_from_feature_store(stage="raw") if fetcher.hops_integration and fetcher.hops_integration.enabled else None
+        
+        # Fallback to local files if Hopsworks fails
+        if raw_data is None or len(raw_data) == 0:
+            print("⚠️ No data in Hopsworks, trying local files...")
+            import glob
+            csv_files = glob.glob("data/historical_*.csv") + glob.glob("data/complete_*.csv")
+            if csv_files:
+                try:
+                    latest_file = max(csv_files, key=os.path.getctime)
+                    print(f"📁 Loading from local file: {latest_file}")
+                    raw_data = pd.read_csv(latest_file)
+                    raw_data['datetime'] = pd.to_datetime(raw_data['datetime'])
+                    print(f"✅ Loaded {len(raw_data)} records from local file")
+                except Exception as e:
+                    print(f"❌ Failed to load from local files: {e}")
+                    raw_data = None
         
         if raw_data is None or len(raw_data) == 0:
             print("❌ No data available for training")
@@ -1591,39 +1626,95 @@ def run_daily_model_pipeline():
         
         # Upload models to Hopsworks if enabled (after BOTH models are trained)
         if fetcher.hops_integration and fetcher.hops_integration.enabled:
-            print("\n☁️ Uploading models to Hopsworks Model Registry...")
-            try:
-                # Use the models directory with absolute path (both sklearn and dl models are saved there)
-                models_dir = os.path.abspath("models")
-                
-                # Upload sklearn model if trained successfully
-                if sklearn_results and sklearn_model_path and os.path.exists(sklearn_model_path):
-                    print(f"📤 Uploading sklearn model from: {models_dir}")
-                    sklearn_success = fetcher.hops_integration.save_model(
-                        models_dir, "aqi_sklearn_model", "sklearn"
+            print("\n📤 STEP 4: UPLOADING MODELS TO HOPSWORKS")
+            print("="*60)
+            
+            upload_success_count = 0
+            
+            # Upload sklearn model if trained successfully
+            if sklearn_results and hasattr(sklearn_trainer, 'best_model') and sklearn_trainer.best_model is not None:
+                try:
+                    # Prepare sklearn metrics
+                    sklearn_metrics = {
+                        'model_name': sklearn_trainer.best_model_name,
+                        'test_r2': sklearn_trainer.results[sklearn_trainer.best_model_name]['test_r2'],
+                        'model_type': 'sklearn',
+                        'training_timestamp': datetime.now().isoformat(),
+                        'features_count': len(selected_features),
+                        'training_samples': len(selected_data)
+                    }
+                    
+                    # Add detailed metrics
+                    result = sklearn_trainer.results[sklearn_trainer.best_model_name]
+                    sklearn_metrics.update({
+                        'test_rmse': result.get('test_rmse', 0),
+                        'test_mae': result.get('test_mae', 0),
+                        'train_r2': result.get('train_r2', 0),
+                        'cv_r2_mean': result.get('cv_r2_mean', 0),
+                        'cv_r2_std': result.get('cv_r2_std', 0),
+                        'overfitting_detected': result.get('overfitting', False)
+                    })
+                    
+                    sklearn_upload_success = fetcher.hops_integration.upload_model_to_registry(
+                        model=sklearn_trainer.best_model,
+                        model_name="sklearn_aqi_model",
+                        metrics=sklearn_metrics,
+                        description=f"Daily trained sklearn model: {sklearn_trainer.best_model_name} with R² = {sklearn_metrics['test_r2']:.4f}"
                     )
-                    if sklearn_success:
+                    
+                    if sklearn_upload_success:
                         print("✅ Sklearn model uploaded to Hopsworks")
+                        upload_success_count += 1
                     else:
                         print("❌ Sklearn model upload failed")
-                
-                # Upload deep learning model if trained successfully
-                if dl_results and dl_model_path and os.path.exists(dl_model_path):
-                    print(f"📤 Uploading deep learning model from: {models_dir}")
-                    dl_success = fetcher.hops_integration.save_model(
-                        models_dir, "aqi_dl_model", "tensorflow"
+                        
+                except Exception as e:
+                    print(f"❌ Error uploading sklearn model: {e}")
+            
+            # Upload deep learning model if trained successfully  
+            if dl_results and hasattr(dl_trainer, 'best_model') and dl_trainer.best_model is not None:
+                try:
+                    # Prepare DL metrics
+                    dl_metrics = {
+                        'model_name': dl_trainer.best_model_name,
+                        'test_r2': dl_trainer.results[dl_trainer.best_model_name]['test_r2'],
+                        'model_type': 'tensorflow',
+                        'training_timestamp': datetime.now().isoformat(),
+                        'features_count': len(selected_features),
+                        'training_samples': len(selected_data)
+                    }
+                    
+                    # Add detailed metrics
+                    result = dl_trainer.results[dl_trainer.best_model_name]
+                    dl_metrics.update({
+                        'test_rmse': result.get('test_rmse', 0),
+                        'test_mae': result.get('test_mae', 0),
+                        'train_r2': result.get('train_r2', 0),
+                        'epochs_trained': result.get('epochs_trained', 0),
+                        'final_loss': result.get('final_loss', 0),
+                        'final_val_loss': result.get('final_val_loss', 0)
+                    })
+                    
+                    dl_upload_success = fetcher.hops_integration.upload_model_to_registry(
+                        model=dl_trainer.best_model,
+                        model_name="dl_aqi_model",
+                        metrics=dl_metrics,
+                        description=f"Daily trained deep learning model: {dl_trainer.best_model_name} with R² = {dl_metrics['test_r2']:.4f}"
                     )
-                    if dl_success:
+                    
+                    if dl_upload_success:
                         print("✅ Deep learning model uploaded to Hopsworks")
+                        upload_success_count += 1
                     else:
                         print("❌ Deep learning model upload failed")
-                else:
-                    print("[] Couldnt upload deep learning model to hopswork")
                         
-            except Exception as upload_error:
-                print(f"⚠️ Model upload failed: {upload_error}")
+                except Exception as e:
+                    print(f"❌ Error uploading deep learning model: {e}")
+            
+            print(f"📤 Models uploaded: {upload_success_count}/2")
+            
         else:
-            print("[] Fetcher hopsworks integration error\n")
+            print("⚠️ Hopsworks not enabled - models saved locally only")
         
         print("✅ Daily model pipeline completed successfully!")
         return True

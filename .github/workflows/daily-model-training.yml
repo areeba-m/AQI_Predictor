@@ -1,10 +1,10 @@
-name: Daily Model Training
+name: Manual Model Training (Incremental)
 
 on:
-  schedule:
-    # Run daily at 2 AM UTC
-    - cron: "0 2 * * *"
-  workflow_dispatch: # Allow manual triggering
+  # schedule:
+  #   # Run daily at 2 AM UTC (DISABLED - using hourly full pipeline instead)
+  #   - cron: "0 2 * * *"
+  workflow_dispatch: # Manual triggering only
 
 jobs:
   train-models:
@@ -20,7 +20,7 @@ jobs:
           python-version: "3.11"
 
       - name: Cache pip dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -53,7 +53,7 @@ jobs:
         with:
           name: trained-models
           path: |
-            models/
+            aqi_predictor/models/
           retention-days: 30
 
       - name: Upload logs on failure
@@ -62,6 +62,6 @@ jobs:
         with:
           name: daily-training-logs
           path: |
-            *.log
-            models/
+            aqi_predictor/*.log
+            aqi_predictor/models/
           retention-days: 7

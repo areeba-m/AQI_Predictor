@@ -68,7 +68,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_resource(ttl=300)  # Cache for 5 minutes - use cache_resource for models
 def load_predictor():
     """Load the AQI predictor with caching"""
     try:
@@ -101,7 +101,7 @@ def load_selected_features():
         st.warning(f"Could not load selected features: {e}")
         return None
 
-@st.cache_data(ttl=1800)  # Cache for 30 minutes
+# @st.cache_data(ttl=1800, hash_funcs={"pipelines.fetch_data.HopsworksIntegration": lambda _: None})  # Cache for 30 minutes - temporarily disabled
 def fetch_latest_processed_data():
     """Fetch latest processed data from Hopsworks feature store"""
     try:

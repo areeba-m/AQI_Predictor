@@ -341,11 +341,10 @@ class DeepLearningModelTrainer:
         
         print(f"📊 Input dimensions - Dense: {input_dim}")
         
-        # Define models to train (feedforward networks only - LSTM removed due to underperformance)
+        # Define models to train (feedforward networks only - removed wide feedforward and LSTM for faster training)
         models_to_train = [
             ('Simple Feedforward', lambda: self.create_feedforward_model(input_dim, 'simple'), X_train, X_test, y_train, y_test),
             ('Deep Feedforward', lambda: self.create_feedforward_model(input_dim, 'deep'), X_train, X_test, y_train, y_test),
-            ('Wide Feedforward', lambda: self.create_feedforward_model(input_dim, 'wide'), X_train, X_test, y_train, y_test),
         ]
         
         # Train models

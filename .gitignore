@@ -9,14 +9,12 @@ aqi_predictor/aqi_env/
 aqi_predictor/features/__pycache__/
 aqi_predictor/models/__pycache__/
 aqi_predictor/pipelines/__pycache__/
+aqi_predictor/webapp/__pycache__/
 aqi_predictor/__pycache__/
 *.pyc
 
 aqi_predictor/data/
-
-aqi_predictor/EXECUTION_GUIDE.md
-
-aqi_predictor/PIPELINE_README.md
+aqi_predictor/report.md
 
 *.h5
 *.joblib

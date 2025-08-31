@@ -10,11 +10,25 @@ import json
 import os
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union, Tuple
+import tempfile
+import pickle
 
 import tensorflow as tf
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import warnings
 warnings.filterwarnings('ignore')
+
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
+# Hopsworks imports with error handling
+try:
+    import hopsworks
+    HOPSWORKS_AVAILABLE = True
+except ImportError:
+    HOPSWORKS_AVAILABLE = False
+    print("⚠️ Hopsworks not available. Models will be loaded from local files only.")
 
 # Configure logging
 
@@ -32,15 +46,171 @@ class ModelManager:
         self.dl_scaler_y = None
         self.feature_columns = []
         
+        # Hopsworks connection
+        self.project = None
+        self.mr = None  # Model Registry
+        self.hopsworks_enabled = False
+        self._connect_hopsworks()
+    
+    def _connect_hopsworks(self):
+        """Connect to Hopsworks for model registry access"""
+        if not HOPSWORKS_AVAILABLE:
+            print("⚠️ Hopsworks not available - using local model files")
+            return
+        
+        try:
+            # Get credentials from environment variables
+            api_key = os.getenv('HOPSWORKS_API_KEY')
+            project_name = os.getenv('HOPSWORKS_PROJECT_NAME')
+            
+            if not api_key or not project_name:
+                print("⚠️ Hopsworks credentials not found - using local model files")
+                print("   Add HOPSWORKS_API_KEY and HOPSWORKS_PROJECT_NAME to environment variables")
+                return
+            
+            print(f"🔗 Connecting to Hopsworks project: {project_name}")
+            
+            self.project = hopsworks.login(
+                api_key_value=api_key,
+                project=project_name
+            )
+            
+            if self.project:
+                self.mr = self.project.get_model_registry()
+                self.hopsworks_enabled = True
+                print(f"✅ Connected to Hopsworks model registry")
+            else:
+                print("❌ Failed to connect to Hopsworks")
+                
+        except Exception as e:
+            print(f"⚠️ Hopsworks connection failed: {e}")
+            print("   Will try to load models from local files")
+    
+    def _load_model_from_registry(self, model_name: str, version: int = None) -> Optional[Dict[str, Any]]:
+        """Load model from Hopsworks model registry"""
+        if not self.hopsworks_enabled:
+            return None
+        
+        try:
+            print(f"📥 Fetching latest version of model '{model_name}' from model registry...")
+            
+            # Get all versions of the model to find the latest
+            try:
+                # Get all versions and find the highest version number
+                model_versions = self.mr.get_models(model_name)
+                if not model_versions:
+                    print(f"❌ No versions found for model '{model_name}'")
+                    return None
+                
+                # Find the latest (highest) version number
+                latest_version = max(m.version for m in model_versions)
+                print(f"📊 Latest version found: {latest_version}")
+                
+                # If version is explicitly requested, use it, otherwise use latest
+                if version and version != latest_version:
+                    print(f"🔄 Requesting specific version {version} instead of latest {latest_version}")
+                    model = self.mr.get_model(model_name, version=version)
+                else:
+                    # Get the latest version model
+                    model = self.mr.get_model(model_name, version=latest_version)
+                
+            except Exception as e:
+                print(f"⚠️ Could not determine latest version: {e}")
+                # Fallback - try to get without version (should return latest)
+                if version:
+                    model = self.mr.get_model(model_name, version=version)
+                else:
+                    model = self.mr.get_model(model_name)
+            
+            if not model:
+                print(f"❌ Model '{model_name}' not found in registry")
+                return None
+            
+            print(f"✅ Found model: {model_name} (version {model.version})")
+            
+            # Download model to temp directory
+            print(f"📁 Downloading model to temp directory...")
+            model_dir = model.download()
+            print(f"✅ Model downloaded to: {model_dir}")
+            
+            return {
+                'model': model,
+                'model_dir': model_dir,
+                'version': model.version
+            }
+            
+        except Exception as e:
+            print(f"❌ Error loading model from registry: {e}")
+            return None
+        
     def load_sklearn_model(self) -> bool:
         """Load the best sklearn model and its components"""
         try:
             print("📥 Loading scikit-learn model...")
             
+            # First try to load from Hopsworks model registry
+            model_info = self._load_model_from_registry("aqi_sklearn_model")
+            
+            if model_info:
+                # Load from Hopsworks
+                model_dir = model_info['model_dir']
+                
+                # Load metadata
+                metadata_path = os.path.join(model_dir, "sklearn_model_metadata.json")
+                if os.path.exists(metadata_path):
+                    with open(metadata_path, 'r') as f:
+                        self.sklearn_metadata = json.load(f)
+                else:
+                    # Fallback metadata from model registry
+                    self.sklearn_metadata = {
+                        'model_name': 'Random Forest (from registry)',
+                        'test_r2': model_info['model'].training_metrics.get('r2_score', 0),
+                        'test_rmse': model_info['model'].training_metrics.get('rmse', 0),
+                        'feature_columns': []
+                    }
+                
+                # Look for model file
+                model_files = [f for f in os.listdir(model_dir) 
+                             if f.endswith('.joblib') or f.endswith('.pkl')]
+                
+                if model_files:
+                    model_path = os.path.join(model_dir, model_files[0])
+                    self.sklearn_model = joblib.load(model_path)
+                    
+                    # Load scaler if available
+                    scaler_files = [f for f in os.listdir(model_dir) 
+                                  if 'scaler' in f.lower() and f.endswith('.joblib')]
+                    if scaler_files:
+                        scaler_path = os.path.join(model_dir, scaler_files[0])
+                        self.sklearn_scaler = joblib.load(scaler_path)
+                    
+                    self.feature_columns = self.sklearn_metadata.get('feature_columns', [])
+                    
+                    print(f"✅ Sklearn model loaded from Hopsworks: {self.sklearn_metadata['model_name']}")
+                    print(f"   📈 Test R²: {self.sklearn_metadata.get('test_r2', 0):.4f}")
+                    return True
+            
+            # Fallback to local files
+            print("⚠️ Hopsworks model not available, trying local files...")
+            return self._load_sklearn_model_local()
+            
+        except Exception as e:
+            print(f"❌ Error loading sklearn model from Hopsworks: {e}")
+            print("⚠️ Falling back to local files...")
+            return self._load_sklearn_model_local()
+    
+    def _load_sklearn_model_local(self) -> bool:
+        """Load sklearn model from local files (fallback)"""
+        try:
+            # Check if model directory exists
+            if not os.path.exists(self.model_dir):
+                print(f"❌ Model directory '{self.model_dir}' not found")
+                return False
+            
             # Load metadata
             metadata_path = os.path.join(self.model_dir, "sklearn_model_metadata.json")
             if not os.path.exists(metadata_path):
-                print("❌ Sklearn model metadata not found")
+                print("❌ Sklearn model metadata not found locally")
                 return False
             
             with open(metadata_path, 'r') as f:
@@ -78,6 +248,85 @@ class ModelManager:
         """Load the best deep learning model and its components"""
         try:
             print("📥 Loading deep learning model...")
+            
+            # First try to load from Hopsworks model registry
+            model_info = self._load_model_from_registry("aqi_dl_model")
+            
+            if model_info:
+                # Load from Hopsworks
+                model_dir = model_info['model_dir']
+                
+                # Load metadata
+                metadata_path = os.path.join(model_dir, "dl_model_metadata.json")
+                if os.path.exists(metadata_path):
+                    with open(metadata_path, 'r') as f:
+                        self.dl_metadata = json.load(f)
+                else:
+                    # Fallback metadata
+                    self.dl_metadata = {
+                        'model_name': 'Deep Learning (from registry)',
+                        'test_r2': model_info['model'].training_metrics.get('r2_score', 0),
+                        'test_rmse': model_info['model'].training_metrics.get('rmse', 0),
+                        'feature_columns': []
+                    }
+                
+                # Look for model file
+                model_files = [f for f in os.listdir(model_dir) 
+                             if f.endswith('.h5') or f.endswith('.keras')]
+                
+                if model_files:
+                    model_path = os.path.join(model_dir, model_files[0])
+                    
+                    # Load TensorFlow model
+                    try:
+                        self.dl_model = tf.keras.models.load_model(
+                            model_path,
+                            custom_objects={
+                                'mse': tf.keras.metrics.MeanSquaredError(),
+                                'mae': tf.keras.metrics.MeanAbsoluteError()
+                            }
+                        )
+                    except Exception as e:
+                        print(f"⚠️ Error with custom objects, trying compile=False: {e}")
+                        self.dl_model = tf.keras.models.load_model(model_path, compile=False)
+                        self.dl_model.compile(
+                            optimizer='adam',
+                            loss='mse',
+                            metrics=['mae']
+                        )
+                    
+                    # Load scalers if available
+                    scaler_files = [f for f in os.listdir(model_dir) 
+                                  if 'scaler' in f.lower() and f.endswith('.joblib')]
+                    for scaler_file in scaler_files:
+                        if 'scaler_X' in scaler_file or 'X_scaler' in scaler_file:
+                            self.dl_scaler_X = joblib.load(os.path.join(model_dir, scaler_file))
+                        elif 'scaler_y' in scaler_file or 'y_scaler' in scaler_file:
+                            self.dl_scaler_y = joblib.load(os.path.join(model_dir, scaler_file))
+                    
+                    if not self.feature_columns:
+                        self.feature_columns = self.dl_metadata.get('feature_columns', [])
+                    
+                    print(f"✅ Deep learning model loaded from Hopsworks: {self.dl_metadata['model_name']}")
+                    print(f"   📈 Test R²: {self.dl_metadata.get('test_r2', 0):.4f}")
+                    return True
+            
+            # Fallback to local files
+            print("⚠️ Hopsworks model not available, trying local files...")
+            return self._load_dl_model_local()
+            
+        except Exception as e:
+            print(f"❌ Error loading deep learning model from Hopsworks: {e}")
+            print("⚠️ Falling back to local files...")
+            return self._load_dl_model_local()
+    
+    def _load_dl_model_local(self) -> bool:
+        """Load deep learning model from local files (fallback)"""
+        try:
+            # Check if model directory exists
+            if not os.path.exists(self.model_dir):
+                print(f"❌ Model directory '{self.model_dir}' not found")
+                return False
             
             # Load metadata
             metadata_path = os.path.join(self.model_dir, "dl_model_metadata.json")
@@ -132,7 +381,6 @@ class ModelManager:
             print(f"   📈 Test R²: {self.dl_metadata['test_r2']:.4f}")
             print(f"   📈 Test RMSE: {self.dl_metadata['test_rmse']:.2f}")
             
-            print(f"Deep learning model loaded: {self.dl_metadata['model_name']}")
             return True
             
         except Exception as e:

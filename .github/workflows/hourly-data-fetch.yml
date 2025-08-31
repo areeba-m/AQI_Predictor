@@ -1,4 +1,4 @@
-name: Hourly Data Fetching
+name: Hourly Full Pipeline Training
 
 on:
   schedule:
@@ -20,7 +20,7 @@ jobs:
           python-version: "3.11"
 
       - name: Cache pip dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -42,17 +42,27 @@ jobs:
           echo "HOPSWORKS_PROJECT_NAME=$HOPSWORKS_PROJECT_NAME" >> .env
           echo "HOPSWORKS_HOST=$HOPSWORKS_HOST" >> .env
 
-      - name: Run hourly data fetching
+      - name: Run full pipeline training
         run: |
           cd aqi_predictor
-          python scripts/fetch_hourly_data.py
+          python run_complete_pipeline.py full
+
+      - name: Upload model artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hourly-trained-models
+          path: |
+            aqi_predictor/models/
+          retention-days: 7
 
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: hourly-fetch-logs
+          name: full-pipeline-logs
           path: |
-            *.log
-            data/
+            aqi_predictor/*.log
+            aqi_predictor/models/
+            aqi_predictor/data/
           retention-days: 7
