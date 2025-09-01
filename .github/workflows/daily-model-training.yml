@@ -38,6 +38,7 @@ jobs:
           HOPSWORKS_PROJECT_NAME: ${{ secrets.HOPSWORKS_PROJECT_NAME }}
           HOPSWORKS_HOST: ${{ secrets.HOPSWORKS_HOST }}
         run: |
+          cd aqi_predictor
           echo "HOPSWORKS_API_KEY=$HOPSWORKS_API_KEY" >> .env
           echo "HOPSWORKS_PROJECT_NAME=$HOPSWORKS_PROJECT_NAME" >> .env
           echo "HOPSWORKS_HOST=$HOPSWORKS_HOST" >> .env
